@@ -1,0 +1,26 @@
+name = "mistral-ocr-mcp-worker"
+main = "src/worker.ts"
+compatibility_date = "2025-01-28"
+compatibility_flags = ["nodejs_compat"]
+
+# Node.js compatibility is required for:
+# - Buffer operations
+# - Blob API
+# - fetch() (built-in to Workers but enhanced with nodejs_compat)
+
+[env.production]
+name = "mistral-ocr-mcp-worker"
+
+[env.staging]
+name = "mistral-ocr-mcp-worker-staging"
+
+# Environment variables (public, non-sensitive)
+# For sensitive values like API keys, use: wrangler secret put MISTRAL_API_KEY
+
+# [vars]
+# PUBLIC_VAR = "value"
+
+# To deploy:
+#   1. Set API key: wrangler secret put MISTRAL_API_KEY
+#   2. Deploy: wrangler deploy
+#   3. Your MCP server will be at: https://mistral-ocr-mcp-worker.<your-account>.workers.dev/mcp

@@ -1,0 +1,4 @@
+# Example environment variables for local development with wrangler dev
+# Copy this file to .dev.vars and add your actual API key
+
+MISTRAL_API_KEY=your-mistral-api-key-here

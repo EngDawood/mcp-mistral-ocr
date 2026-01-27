@@ -4,11 +4,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Node.js/TypeScript MCP (Model Context Protocol) server for PDF OCR processing using the Mistral AI API. Designed to be runnable via `npx`. Exposes OCR capabilities to Claude Desktop and other MCP clients. Supports page selection, markdown cleaning, image processing, table extraction, and multilingual documents (Arabic/English).
+Node.js/TypeScript MCP (Model Context Protocol) server for PDF OCR processing using the Mistral AI API. Available in two versions:
 
-**Status:** ✅ Implementation complete - all 6 tools implemented and tested
+1. **Local Version** (`src/index.ts`) - stdio transport, runnable via `npx`, supports file system operations
+2. **Cloudflare Worker Version** (`src/worker.ts`) - HTTP/SSE transport, deployed to Cloudflare's edge network, no filesystem access
 
-## Architecture
+**Status:** ✅ Implementation complete - all 6 tools implemented and tested (local), 5 tools in Worker version
+
+## Two Deployment Options
+
+### Local Version (main branch)
 
 - **Runtime:** Node.js 18+ (TypeScript compiled to JS)
 - **MCP SDK:** `@modelcontextprotocol/sdk` v1.25.3 (official MCP SDK for Node.js)
@@ -18,7 +23,20 @@ Node.js/TypeScript MCP (Model Context Protocol) server for PDF OCR processing us
 - **Distribution:** npm package, runnable via `npx`
 - **Build Tool:** Bun (for faster installs) or npm
 
-## Implemented Tools (6 total)
+### Cloudflare Worker Version (cloudflare-worker branch)
+
+- **Runtime:** Cloudflare Workers (edge compute)
+- **MCP SDK:** Cloudflare's `agents/mcp` package + `@modelcontextprotocol/sdk`
+- **AI SDK:** `@mistralai/mistralai` v1.13.0
+- **Validation:** Zod v3.25.76 schemas
+- **Transport:** HTTP/SSE (Streamable HTTP transport)
+- **Distribution:** Deployed to `*.workers.dev` or custom domain
+- **Build Tool:** Wrangler (Cloudflare's CLI)
+- **Limitations:** No filesystem access (use URLs or base64 instead)
+
+## Implemented Tools
+
+### Local Version (6 tools)
 
 | Tool Name | Description | Key Parameters |
 |-----------|-------------|----------------|
@@ -29,26 +47,41 @@ Node.js/TypeScript MCP (Model Context Protocol) server for PDF OCR processing us
 | `mistral_ocr_extract_tables` | Extract tables in HTML/markdown format | `file_path`, `table_format`, `pages` |
 | `mistral_ocr_clean_markdown` | Clean repetitive content from markdown | `content`, `config_path` |
 
+### Worker Version (5 tools)
+
+| Tool Name | Description | Key Parameters | Notes |
+|-----------|-------------|----------------|-------|
+| `mistral_ocr_process_url` | Process PDF from URL | `url`, `output_format`, `pages`, `clean_output`, `table_format`, `include_images`, `include_hyperlinks` | No `keep_pdf` (no filesystem) |
+| `mistral_ocr_process_image` | Process image (URL or base64) | `image_source`, `source_type`, `output_format`, `clean_output` | `source_type`: "url" or "base64" only |
+| `mistral_ocr_extract_structured` | Extract structured data | `source`, `source_type`, `json_schema`, `pages`, `annotation_type` | Uses `source`/`source_type` instead of `file_path` |
+| `mistral_ocr_extract_tables` | Extract tables | `source`, `source_type`, `table_format`, `pages` | Uses `source`/`source_type` instead of `file_path` |
+| `mistral_ocr_clean_markdown` | Clean repetitive markdown | `content` | Stateless, works identically |
+
 ## Project Structure
 
 ```
 mistral-mcp-js/
 ├── .env                      # API key (git ignored)
 ├── .env.example              # Template for API key
+├── .dev.vars.example         # Worker local dev vars template
 ├── .gitignore
 ├── .mcp.json                 # MCP client configuration
 ├── CLAUDE.md                 # Project documentation (this file)
+├── README.md                 # Local version readme
+├── README.worker.md          # Worker version readme
 ├── package.json              # npm package config
-├── tsconfig.json             # TypeScript configuration
+├── tsconfig.json             # TypeScript config (local)
+├── tsconfig.worker.json      # TypeScript config (worker)
+├── wrangler.toml             # Cloudflare Worker config
 ├── bun.lockb                 # Bun lockfile
 ├── src/
-│   └── index.ts              # Main MCP server (~1,500 lines, single-file)
+│   ├── index.ts              # Local MCP server (~1,500 lines, stdio)
+│   └── worker.ts             # Cloudflare Worker MCP server (~800 lines, HTTP/SSE)
 ├── dist/                     # Compiled JS output (git ignored)
-│   ├── index.js              # Compiled server
+│   ├── index.js              # Compiled local server
 │   ├── index.d.ts            # Type declarations
 │   └── index.js.map          # Source maps
-├── node_modules/             # Dependencies (95 packages)
-└── README.md                 # Project readme
+└── node_modules/             # Dependencies
 ```
 
 ## Key Implementation Details
@@ -103,6 +136,28 @@ mistral-mcp-js/
 
 **Note:** This configuration is already added to `.mcp.json` in this repository.
 
+### Cloudflare Worker (Remote)
+
+```json
+{
+  "mcpServers": {
+    "mistral_ocr_worker": {
+      "type": "sse",
+      "url": "https://mistral-ocr-mcp-worker.<your-account>.workers.dev/mcp"
+    }
+  }
+}
+```
+
+**Worker Deployment:**
+```bash
+# Set API key secret
+npx wrangler secret put MISTRAL_API_KEY
+
+# Deploy to Cloudflare
+npm run worker:deploy
+```
+
 ## Dependencies
 
 **Installed (95 packages total):**
@@ -110,19 +165,24 @@ mistral-mcp-js/
 ```json
 {
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.25.3",
-    "@mistralai/mistralai": "^1.13.0",
-    "dotenv": "^16.6.1",
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "@mistralai/mistralai": "^1.5.0",
+    "agents": "^0.0.1",
+    "dotenv": "^16.4.7",
     "zod": "^3.25.76"
   },
   "devDependencies": {
-    "typescript": "^5.9.3",
-    "@types/node": "^22.19.7"
+    "@cloudflare/workers-types": "^4.20250117.0",
+    "typescript": "^5.7.0",
+    "@types/node": "^22.0.0",
+    "wrangler": "^3.103.0"
   }
 }
 ```
 
 ## Build & Run Commands
+
+### Local Version
 
 ```bash
 # Install dependencies
@@ -143,6 +203,31 @@ npx mistral-ocr-mcp
 
 # Test with MCP Inspector
 npx @modelcontextprotocol/inspector node dist/index.js
+```
+
+### Cloudflare Worker Version
+
+```bash
+# Install dependencies
+npm install
+
+# Local development (with .dev.vars)
+npm run worker:dev
+# Server runs at: http://localhost:8787/mcp
+
+# Deploy to Cloudflare
+npm run worker:deploy
+# Deployed to: https://mistral-ocr-mcp-worker.<account>.workers.dev/mcp
+
+# Set API key secret (production)
+npx wrangler secret put MISTRAL_API_KEY
+
+# View logs
+npx wrangler tail
+
+# Test with MCP Inspector (local)
+npx @modelcontextprotocol/inspector
+# Connect to: http://localhost:8787/mcp
 ```
 
 **Build Output:**

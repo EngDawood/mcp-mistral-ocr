@@ -24,6 +24,7 @@ __pycache__/
 .env
 .env.local
 .env.production
+.dev.vars
 
 # OS generated files
 .DS_Store
@@ -45,3 +46,7 @@ test_*/
 CLAUDE.local.md
 .mcp.json
 .claude/
+
+# Wrangler / Cloudflare Workers
+.wrangler/
+wrangler.toml.bak
