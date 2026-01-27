@@ -22,6 +22,12 @@ import { z } from "zod";
 // Constants
 const DEFAULT_MODEL = "mistral-ocr-latest";
 
+// Module-level env reference, set on each request in the fetch handler.
+// Safe because Cloudflare Workers are single-threaded per isolate.
+let _env: any;
+// User-provided API key from query parameter (overrides env secret)
+let _userApiKey: string | null = null;
+
 // =============================================================================
 // Zod Input Schemas (Worker-compatible versions)
 // =============================================================================
@@ -160,11 +166,11 @@ function cleanMarkdownContent(content: string): [string, string] {
   return [cleanedContent, "lightweight inline deduplication"];
 }
 
-function getApiKey(env: any): string {
-  const apiKey = env.MISTRAL_API_KEY;
+function getApiKey(): string {
+  const apiKey = _userApiKey || _env?.MISTRAL_API_KEY;
   if (!apiKey) {
     throw new Error(
-      "MISTRAL_API_KEY not found. Configure it in wrangler.toml or via wrangler secret."
+      "MISTRAL_API_KEY not found. Pass ?apiKey=YOUR_KEY in the URL or configure via wrangler secret."
     );
   }
   return apiKey;
@@ -209,11 +215,12 @@ async function processImageOcr(
     model,
   });
 
-  if (!response.result || typeof response.result !== "string") {
-    throw new Error("Unexpected OCR response format");
+  if (!response.pages || !Array.isArray(response.pages)) {
+    throw new Error("Unexpected OCR response format: no pages returned");
   }
 
-  return [response.result, warnings];
+  const content = (response.pages as any[]).map((page: any) => page.markdown).join("\n\n");
+  return [content, warnings];
 }
 
 async function processPdfOcr(
@@ -232,63 +239,24 @@ async function processPdfOcr(
   const client = new Mistral({ apiKey });
   const warnings: string[] = [];
 
-  // Prepare PDF for upload
-  let pdfBuffer: ArrayBuffer;
-  let filename: string;
+  // Build OCR document reference
+  let documentRef: any;
 
   if (sourceType === "url") {
-    const response = await fetch(pdfSource);
-    if (!response.ok) {
-      throw new Error(`Failed to download PDF: ${response.status} ${response.statusText}`);
-    }
-    pdfBuffer = await response.arrayBuffer();
-    const urlObj = new URL(pdfSource);
-    filename = urlObj.pathname.split('/').pop() || "document.pdf";
-    if (!filename.toLowerCase().endsWith(".pdf")) {
-      filename = "document.pdf";
-    }
+    // Pass URL directly to OCR API — no download/upload needed
+    documentRef = { type: "document_url", documentUrl: pdfSource };
   } else {
-    // base64
+    // base64: pass as data URI
     const base64Data = pdfSource.includes(",") ? pdfSource.split(",")[1] : pdfSource;
-    const binaryString = atob(base64Data);
-    const bytes = new Uint8Array(binaryString.length);
-    for (let i = 0; i < binaryString.length; i++) {
-      bytes[i] = binaryString.charCodeAt(i);
-    }
-    pdfBuffer = bytes.buffer;
-    filename = "document.pdf";
+    documentRef = {
+      type: "document_url",
+      documentUrl: `data:application/pdf;base64,${base64Data}`,
+    };
   }
-
-  // Upload PDF
-  const pdfBlob = new Blob([pdfBuffer], { type: "application/pdf" });
-  const uploadResponse = await client.files.upload({
-    file: {
-      name: filename,
-      type: "application/pdf",
-      data: pdfBlob,
-    } as any,
-  });
-
-  if (!uploadResponse.id) {
-    throw new Error("File upload failed: no file ID returned");
-  }
-
-  const fileId = uploadResponse.id;
-
-  // Get signed URL
-  const signedUrlResponse = await client.files.getSignedUrl({
-    fileId,
-  });
-
-  if (!signedUrlResponse.url) {
-    throw new Error("Failed to get signed URL");
-  }
-
-  const signedUrl = signedUrlResponse.url;
 
   // Build OCR parameters
   const ocrParams: any = {
-    document: { type: "url", url: signedUrl },
+    document: documentRef,
     model,
     includeBreakdown: true,
   };
@@ -315,13 +283,15 @@ async function processPdfOcr(
     }
   }
 
-  if (!ocrResponse.result || typeof ocrResponse.result !== "string") {
-    throw new Error("Unexpected OCR response format");
+  if (!ocrResponse.pages || !Array.isArray(ocrResponse.pages)) {
+    throw new Error("Unexpected OCR response format: no pages returned");
   }
 
-  let content = ocrResponse.result;
-  const pageCount = (ocrResponse as any).pageCount || 0;
-  const pagesProcessed = ocrParams.pages || [];
+  // Join all page markdown content
+  const allPages = ocrResponse.pages as any[];
+  let content = allPages.map((page: any) => page.markdown).join("\n\n");
+  const pageCount = allPages.length;
+  const pagesProcessed = ocrParams.pages || Array.from({ length: pageCount }, (_: any, i: number) => i + 1);
 
   // Convert format
   if (outputFormat === "text") {
@@ -407,10 +377,10 @@ server.registerTool(
       openWorldHint: true,
     },
   },
-  async (params, extra) => {
+  async (params) => {
     try {
       const input = ProcessUrlInputSchema.parse(params);
-      const apiKey = getApiKey((extra as any).env);
+      const apiKey = getApiKey();
 
       const result = await processPdfOcr(
         input.url,
@@ -469,10 +439,10 @@ server.registerTool(
       openWorldHint: true,
     },
   },
-  async (params, extra) => {
+  async (params) => {
     try {
       const input = ProcessImageInputSchema.parse(params);
-      const apiKey = getApiKey((extra as any).env);
+      const apiKey = getApiKey();
 
       const [content, warnings] = await processImageOcr(
         input.image_source,
@@ -533,57 +503,34 @@ server.registerTool(
       openWorldHint: true,
     },
   },
-  async (params, extra) => {
+  async (params) => {
     try {
       const input = ExtractStructuredInputSchema.parse(params);
-      const apiKey = getApiKey((extra as any).env);
+      const apiKey = getApiKey();
       const client = new Mistral({ apiKey });
 
       const schema = buildSchemaFromJson(input.json_schema);
 
       // Determine document type and prepare source
-      let documentType: "url" | "image_url";
-      let documentSource: string;
+      let documentRef: any;
 
       if (input.source_type === "url") {
         const lowerSource = input.source.toLowerCase();
         if (lowerSource.endsWith(".pdf")) {
-          // Upload PDF and get signed URL
-          const response = await fetch(input.source);
-          if (!response.ok) {
-            throw new Error(`Failed to download: ${response.status}`);
-          }
-          const buffer = await response.arrayBuffer();
-          const blob = new Blob([buffer], { type: "application/pdf" });
-          const uploadResponse = await client.files.upload({
-            file: {
-              name: "document.pdf",
-              type: "application/pdf",
-              data: blob,
-            } as any,
-          });
-          const signedUrlResponse = await client.files.getSignedUrl({
-            fileId: uploadResponse.id!,
-          });
-          documentType = "url";
-          documentSource = signedUrlResponse.url!;
+          documentRef = { type: "document_url", documentUrl: input.source };
         } else {
-          // Image URL
-          documentType = "image_url";
-          documentSource = input.source;
+          documentRef = { type: "image_url", imageUrl: input.source };
         }
       } else {
         // base64
-        documentType = "image_url";
-        documentSource = input.source.startsWith("data:")
+        const src = input.source.startsWith("data:")
           ? input.source
           : `data:image/png;base64,${input.source}`;
+        documentRef = { type: "image_url", imageUrl: src };
       }
 
       const ocrParams: any = {
-        document: documentType === "url"
-          ? { type: "url", url: documentSource }
-          : { type: "image_url", imageUrl: documentSource },
+        document: documentRef,
         model: DEFAULT_MODEL,
       };
 
@@ -602,7 +549,7 @@ server.registerTool(
             type: "text",
             text: JSON.stringify({
               success: true,
-              structured_data: (response as any).documentAnnotation || response.result,
+              structured_data: (response as any).documentAnnotation || (response.pages as any[])?.map((p: any) => p.markdown).join("\n\n"),
               annotation_type: input.annotation_type,
             }, null, 2),
           },
@@ -638,10 +585,10 @@ server.registerTool(
       openWorldHint: true,
     },
   },
-  async (params, extra) => {
+  async (params) => {
     try {
       const input = ExtractTablesInputSchema.parse(params);
-      const apiKey = getApiKey((extra as any).env);
+      const apiKey = getApiKey();
 
       const result = await processPdfOcr(
         input.source,
@@ -740,6 +687,9 @@ server.registerTool(
 
 export default {
   fetch: (request: Request, env: any, ctx: any) => {
+    _env = env;
+    const url = new URL(request.url);
+    _userApiKey = url.searchParams.get("apiKey");
     return createMcpHandler(server)(request, env, ctx);
   },
 };

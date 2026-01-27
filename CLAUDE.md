@@ -9,7 +9,7 @@ Node.js/TypeScript MCP (Model Context Protocol) server for PDF OCR processing us
 1. **Local Version** (`src/index.ts`) - stdio transport, runnable via `npx`, supports file system operations
 2. **Cloudflare Worker Version** (`src/worker.ts`) - HTTP/SSE transport, deployed to Cloudflare's edge network, no filesystem access
 
-**Status:** ✅ Implementation complete - all 6 tools implemented and tested (local), 5 tools in Worker version
+**Status:** ✅ Both versions complete - Local version (6 tools) on main branch, Worker version (5 tools) on cloudflare-worker branch
 
 ## Two Deployment Options
 
@@ -301,7 +301,16 @@ All tools include MCP annotations for optimal client behavior:
 
 ### Testing
 
+**Local Version:**
 - ✅ Compiles without errors with TypeScript 5.9.3
 - ✅ Server starts and connects via stdio transport
 - ✅ All 6 tools registered with proper schemas
 - ⏳ Pending: End-to-end testing with real PDFs/images (requires MISTRAL_API_KEY)
+
+**Worker Version:**
+- ✅ Compiles without errors with TypeScript 5.9.3
+- ✅ Worker entry point exports proper fetch handler
+- ✅ All 5 tools registered with proper schemas
+- ✅ HTTP/SSE transport configured via createMcpHandler
+- ⏳ Pending: Local testing with wrangler dev
+- ⏳ Pending: Production deployment to Cloudflare Workers
