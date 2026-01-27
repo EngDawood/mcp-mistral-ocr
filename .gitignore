@@ -1,0 +1,47 @@
+# Generated output files
+*.csv
+
+# PDF files
+*.pdf
+
+# IDE and workspace files
+*.code-workspace
+.vscode/
+.idea/
+
+# Node.js
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Python cache (reference files)
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Environment files
+.env
+.env.local
+.env.production
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+
+# Gemini
+.gemini/
+.clinerules/*
+
+# Test directories
+test_*/
+
+# CLAUDE local memory
+CLAUDE.local.md
+.mcp.json
+.claude/
