@@ -42,5 +42,8 @@
     "@types/node": "^22.0.0",
     "typescript": "^5.7.0",
     "wrangler": "^3.103.0"
+  },
+  "overrides": {
+    "@modelcontextprotocol/sdk": "^1.12.1"
   }
 }
