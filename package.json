@@ -11,8 +11,12 @@
   ],
   "scripts": {
     "build": "tsc",
+    "build:worker": "tsc --project tsconfig.worker.json",
     "start": "node dist/index.js",
-    "dev": "tsc --watch"
+    "dev": "tsc --watch",
+    "deploy": "wrangler deploy",
+    "worker:dev": "wrangler dev",
+    "worker:deploy": "wrangler deploy"
   },
   "engines": {
     "node": ">=18.0.0"
@@ -27,13 +31,16 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.1",
     "@mistralai/mistralai": "^1.5.0",
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "agents": "^0.3.6",
     "dotenv": "^16.4.7",
     "zod": "^3.24.2"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260127.0",
+    "@types/node": "^22.0.0",
     "typescript": "^5.7.0",
-    "@types/node": "^22.0.0"
+    "wrangler": "^3.103.0"
   }
 }
