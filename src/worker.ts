@@ -167,7 +167,8 @@ function cleanMarkdownContent(content: string): [string, string] {
 }
 
 function getApiKey(): string {
-  const apiKey = _userApiKey || _env?.MISTRAL_API_KEY;
+  // Priority: user query param > user secret > default fallback
+  const apiKey = _userApiKey || _env?.MISTRAL_API_KEY || _env?.DEFAULT_MISTRAL_API_KEY;
   if (!apiKey) {
     throw new Error(
       "MISTRAL_API_KEY not found. Pass ?apiKey=YOUR_KEY in the URL or configure via wrangler secret."

@@ -124,7 +124,16 @@ compatibility_flags = ["nodejs_compat"]
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `MISTRAL_API_KEY` | Yes | Mistral AI API key (set via `wrangler secret put`) |
+| `MISTRAL_API_KEY` | No* | User's Mistral AI API key (set via `wrangler secret put`) |
+| `DEFAULT_MISTRAL_API_KEY` | No* | Fallback API key for users without their own key |
+| `MCP_AUTH_KEY` | No | Authentication key to protect the Worker endpoint |
+
+*At least one of `MISTRAL_API_KEY` or `DEFAULT_MISTRAL_API_KEY` must be set, or users must pass `?apiKey=` in the URL.
+
+**API Key Priority:**
+1. `?apiKey=` query parameter (user-provided per request)
+2. `MISTRAL_API_KEY` secret (user's configured key)
+3. `DEFAULT_MISTRAL_API_KEY` secret (operator's fallback key)
 
 ## Examples
 
