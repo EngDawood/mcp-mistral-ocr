@@ -4,10 +4,11 @@ Local memory for the Cloudflare Worker version of Mistral OCR MCP Server.
 
 ## Branch Information
 
-**Branch Name:** cloudflare-worker
+**Branch Name:** main (merged from cloudflare-worker on January 31, 2026)
 **Created:** January 28, 2026
-**Status:** ✅ Complete and ready for deployment
-**Latest Commit:** `50bdfd4` - "feat: Add Cloudflare Worker version with HTTP/SSE transport"
+**Status:** ✅ Complete and deployed via GitHub → Cloudflare Workers Builds
+**Worker Name:** `mcp-mistral-ocr`
+**Latest Commit:** `d7a60c4` - "fix: Add npm overrides to resolve MCP SDK version conflict"
 
 ## Implementation Status
 
@@ -87,22 +88,23 @@ export default {
 **Purpose:** Cloudflare Worker configuration
 
 ```toml
-name = "mistral-ocr-mcp-worker"
+name = "mcp-mistral-ocr"
 main = "src/worker.ts"
 compatibility_date = "2025-01-28"
 compatibility_flags = ["nodejs_compat"]
 
 [env.production]
-name = "mistral-ocr-mcp-worker"
+name = "mcp-mistral-ocr"
 
 [env.staging]
-name = "mistral-ocr-mcp-worker-staging"
+name = "mcp-mistral-ocr-staging"
 ```
 
 **Critical Settings:**
 - `nodejs_compat` flag: Enables Node.js API subset (Buffer, Blob, fetch enhancements)
 - `main`: Points to Worker entry point (src/worker.ts)
 - `compatibility_date`: Set to latest (2025-01-28)
+- No `[build]` section - Wrangler handles TypeScript natively
 
 ### 3. tsconfig.worker.json
 **Purpose:** TypeScript configuration for Worker build
@@ -164,14 +166,14 @@ npm run worker:dev
 **Added Dependencies:**
 ```json
 "dependencies": {
-  "agents": "^0.0.1"  // Cloudflare's MCP handler
+  "agents": "^0.3.6"  // Cloudflare's MCP handler
 }
 ```
 
 **Added Dev Dependencies:**
 ```json
 "devDependencies": {
-  "@cloudflare/workers-types": "^4.20250117.0",
+  "@cloudflare/workers-types": "^4.20260127.0",
   "wrangler": "^3.103.0"
 }
 ```
@@ -182,6 +184,13 @@ npm run worker:dev
   "build:worker": "tsc --project tsconfig.worker.json",
   "worker:dev": "wrangler dev",
   "worker:deploy": "wrangler deploy"
+}
+```
+
+**Added Overrides (fixes MCP SDK version conflict):**
+```json
+"overrides": {
+  "@modelcontextprotocol/sdk": "^1.12.1"
 }
 ```
 
@@ -223,24 +232,24 @@ npx @modelcontextprotocol/inspector
 # Connect to: http://localhost:8787/mcp
 ```
 
-### Production Deployment
+### Production Deployment (via GitHub)
 ```bash
-# 1. Set production API key (one-time, encrypted)
+# 1. Set production API key (via Cloudflare dashboard or wrangler)
 npx wrangler secret put MISTRAL_API_KEY
 # Enter your API key when prompted
 
-# 2. Deploy to Cloudflare
-npm run worker:deploy
+# 2. Deployment is automatic via GitHub → Cloudflare Workers Builds
+# Push to main branch triggers automatic deployment
 
 # 3. Note your deployment URL
-# https://mistral-ocr-mcp-worker.<your-account>.workers.dev/mcp
+# https://mcp-mistral-ocr.<your-account>.workers.dev/mcp
 ```
 
 ### Staging Deployment
 ```bash
-# Deploy to staging environment
+# Deploy to staging environment (manual)
 npx wrangler deploy --env staging
-# https://mistral-ocr-mcp-worker-staging.<your-account>.workers.dev/mcp
+# https://mcp-mistral-ocr-staging.<your-account>.workers.dev/mcp
 ```
 
 ### Custom Domain Setup
@@ -257,7 +266,7 @@ npx wrangler deploy --env staging
   "mcpServers": {
     "mistral_ocr_worker": {
       "type": "sse",
-      "url": "https://mistral-ocr-mcp-worker.<your-account>.workers.dev/mcp"
+      "url": "https://mcp-mistral-ocr.<your-account>.workers.dev/mcp"
     }
   }
 }
@@ -513,7 +522,7 @@ If migrating from local stdio version:
 -       "MISTRAL_API_KEY": "your-api-key"
 -     }
 +     "type": "sse",
-+     "url": "https://mistral-ocr-mcp-worker.<account>.workers.dev/mcp"
++     "url": "https://mistral-ocr-mcp.<account>.workers.dev/mcp"
     }
   }
 }
@@ -558,26 +567,17 @@ If migrating from local stdio version:
    ```
 
 2. **Production Deployment:**
-   ```bash
-   npx wrangler secret put MISTRAL_API_KEY
-   npm run worker:deploy
-   ```
+   - Push to main branch triggers automatic deployment via GitHub → Cloudflare Workers Builds
+   - Set API key via Cloudflare dashboard or: `npx wrangler secret put MISTRAL_API_KEY`
 
 3. **Connect to Claude Desktop:**
-   - Add Worker URL to MCP config
+   - Add Worker URL to MCP config: `https://mcp-mistral-ocr.<account>.workers.dev/mcp`
    - Test with real PDF/image processing
-
-4. **Optional: Merge to Main:**
-   ```bash
-   git checkout main
-   git merge cloudflare-worker
-   # Or keep branches separate for different deployment targets
-   ```
 
 ## Last Updated
 
-**Date:** January 28, 2026
+**Date:** January 31, 2026
 **By:** Claude Code (claude.ai/code)
-**Status:** Worker version complete and ready for deployment
-**Branch:** cloudflare-worker
-**Commit:** 50bdfd4
+**Status:** Worker version merged to main and deployed via GitHub → Cloudflare Workers Builds
+**Branch:** main
+**Commit:** d7a60c4

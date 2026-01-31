@@ -44,6 +44,8 @@ test_*/
 
 # CLAUDE local memory
 CLAUDE.local.md
+*.local.md
+
 .mcp.json
 .claude/
 

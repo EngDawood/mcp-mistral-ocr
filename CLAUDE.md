@@ -9,7 +9,7 @@ Node.js/TypeScript MCP (Model Context Protocol) server for PDF OCR processing us
 1. **Local Version** (`src/index.ts`) - stdio transport, runnable via `npx`, supports file system operations
 2. **Cloudflare Worker Version** (`src/worker.ts`) - HTTP/SSE transport, deployed to Cloudflare's edge network, no filesystem access
 
-**Status:** ✅ Both versions complete - Local version (6 tools) on main branch, Worker version (5 tools) on cloudflare-worker branch
+**Status:** ✅ Both versions complete and merged to main - Local version (6 tools) + Worker version (5 tools)
 
 ## Two Deployment Options
 
@@ -23,15 +23,16 @@ Node.js/TypeScript MCP (Model Context Protocol) server for PDF OCR processing us
 - **Distribution:** npm package, runnable via `npx`
 - **Build Tool:** Bun (for faster installs) or npm
 
-### Cloudflare Worker Version (cloudflare-worker branch)
+### Cloudflare Worker Version (merged to main)
 
 - **Runtime:** Cloudflare Workers (edge compute)
 - **MCP SDK:** Cloudflare's `agents/mcp` package + `@modelcontextprotocol/sdk`
 - **AI SDK:** `@mistralai/mistralai` v1.13.0
 - **Validation:** Zod v3.25.76 schemas
 - **Transport:** HTTP/SSE (Streamable HTTP transport)
-- **Distribution:** Deployed to `*.workers.dev` or custom domain
-- **Build Tool:** Wrangler (Cloudflare's CLI)
+- **Distribution:** Deployed via GitHub to Cloudflare Workers Builds
+- **Worker Name:** `mcp-mistral-ocr`
+- **Build Tool:** Cloudflare Workers Builds (automatic via GitHub integration)
 - **Limitations:** No filesystem access (use URLs or base64 instead)
 
 ## Implemented Tools
@@ -143,19 +144,18 @@ mistral-mcp-js/
   "mcpServers": {
     "mistral_ocr_worker": {
       "type": "sse",
-      "url": "https://mistral-ocr-mcp-worker.<your-account>.workers.dev/mcp"
+      "url": "https://mcp-mistral-ocr.<your-account>.workers.dev/mcp"
     }
   }
 }
 ```
 
 **Worker Deployment:**
-```bash
-# Set API key secret
-npx wrangler secret put MISTRAL_API_KEY
+Deploys automatically via GitHub integration to Cloudflare Workers Builds.
 
-# Deploy to Cloudflare
-npm run worker:deploy
+```bash
+# Set API key secret (via Cloudflare dashboard or wrangler)
+npx wrangler secret put MISTRAL_API_KEY
 ```
 
 ## Dependencies
@@ -167,18 +167,23 @@ npm run worker:deploy
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
     "@mistralai/mistralai": "^1.5.0",
-    "agents": "^0.0.1",
+    "agents": "^0.3.6",
     "dotenv": "^16.4.7",
-    "zod": "^3.25.76"
+    "zod": "^3.24.2"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20250117.0",
+    "@cloudflare/workers-types": "^4.20260127.0",
     "typescript": "^5.7.0",
     "@types/node": "^22.0.0",
     "wrangler": "^3.103.0"
+  },
+  "overrides": {
+    "@modelcontextprotocol/sdk": "^1.12.1"
   }
 }
 ```
+
+**Note:** The `overrides` section forces a single version of `@modelcontextprotocol/sdk` to resolve type conflicts between direct and transitive dependencies.
 
 ## Build & Run Commands
 
@@ -215,11 +220,10 @@ npm install
 npm run worker:dev
 # Server runs at: http://localhost:8787/mcp
 
-# Deploy to Cloudflare
-npm run worker:deploy
-# Deployed to: https://mistral-ocr-mcp-worker.<account>.workers.dev/mcp
+# Production deploys automatically via GitHub → Cloudflare Workers Builds
+# Deployed to: https://mcp-mistral-ocr.<account>.workers.dev/mcp
 
-# Set API key secret (production)
+# Set API key secret (via Cloudflare dashboard or wrangler)
 npx wrangler secret put MISTRAL_API_KEY
 
 # View logs
@@ -312,5 +316,6 @@ All tools include MCP annotations for optimal client behavior:
 - ✅ Worker entry point exports proper fetch handler
 - ✅ All 5 tools registered with proper schemas
 - ✅ HTTP/SSE transport configured via createMcpHandler
-- ⏳ Pending: Local testing with wrangler dev
-- ⏳ Pending: Production deployment to Cloudflare Workers
+- ✅ Merged to main branch
+- ✅ GitHub → Cloudflare Workers Builds integration configured
+- ⏳ Pending: End-to-end testing with real PDFs/images
