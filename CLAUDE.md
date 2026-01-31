@@ -11,6 +11,36 @@ Node.js/TypeScript MCP (Model Context Protocol) server for PDF OCR processing us
 
 **Status:** ✅ Both versions complete and merged to main - Local version (6 tools) + Worker version (5 tools)
 
+## Git Workflow
+
+**IMPORTANT:** Follow this branching strategy:
+
+| Branch | Purpose |
+|--------|---------|
+| `main` | Production - only merge from `dev` for releases |
+| `dev` | Integration branch - PRs merge here first |
+| `feature/*` | Feature branches - create from `dev`, PR to `dev` |
+
+**Rules:**
+- ❌ **NEVER push directly to `main`**
+- ❌ **NEVER push directly to `dev`**
+- ✅ Create feature branches from `dev`
+- ✅ Create PRs to merge into `dev`
+- ✅ Merge `dev` → `main` only for production releases
+
+**Workflow:**
+```bash
+# Start new feature
+git checkout dev && git pull
+git checkout -b feature/my-feature
+
+# Work on feature, then push
+git push -u origin feature/my-feature
+
+# Create PR to dev (not main!)
+gh pr create --base dev
+```
+
 ## Two Deployment Options
 
 ### Local Version (main branch)
