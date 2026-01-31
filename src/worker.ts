@@ -377,7 +377,7 @@ server.registerTool(
       openWorldHint: true,
     },
   },
-  async (params) => {
+  async (params: Record<string, unknown>) => {
     try {
       const input = ProcessUrlInputSchema.parse(params);
       const apiKey = getApiKey();
@@ -404,7 +404,7 @@ server.registerTool(
       return {
         content: [
           {
-            type: "text",
+            type: "text" as const,
             text: JSON.stringify(result, null, 2),
           },
         ],
@@ -413,7 +413,7 @@ server.registerTool(
       return {
         content: [
           {
-            type: "text",
+            type: "text" as const,
             text: JSON.stringify({
               success: false,
               error: error.message,
@@ -439,7 +439,7 @@ server.registerTool(
       openWorldHint: true,
     },
   },
-  async (params) => {
+  async (params: Record<string, unknown>) => {
     try {
       const input = ProcessImageInputSchema.parse(params);
       const apiKey = getApiKey();
@@ -463,7 +463,7 @@ server.registerTool(
       return {
         content: [
           {
-            type: "text",
+            type: "text" as const,
             text: JSON.stringify({
               success: true,
               content: finalContent,
@@ -477,7 +477,7 @@ server.registerTool(
       return {
         content: [
           {
-            type: "text",
+            type: "text" as const,
             text: JSON.stringify({
               success: false,
               error: error.message,
@@ -503,7 +503,7 @@ server.registerTool(
       openWorldHint: true,
     },
   },
-  async (params) => {
+  async (params: Record<string, unknown>) => {
     try {
       const input = ExtractStructuredInputSchema.parse(params);
       const apiKey = getApiKey();
@@ -546,7 +546,7 @@ server.registerTool(
       return {
         content: [
           {
-            type: "text",
+            type: "text" as const,
             text: JSON.stringify({
               success: true,
               structured_data: (response as any).documentAnnotation || (response.pages as any[])?.map((p: any) => p.markdown).join("\n\n"),
@@ -559,7 +559,7 @@ server.registerTool(
       return {
         content: [
           {
-            type: "text",
+            type: "text" as const,
             text: JSON.stringify({
               success: false,
               error: error.message,
@@ -585,7 +585,7 @@ server.registerTool(
       openWorldHint: true,
     },
   },
-  async (params) => {
+  async (params: Record<string, unknown>) => {
     try {
       const input = ExtractTablesInputSchema.parse(params);
       const apiKey = getApiKey();
@@ -606,7 +606,7 @@ server.registerTool(
       return {
         content: [
           {
-            type: "text",
+            type: "text" as const,
             text: JSON.stringify({
               success: true,
               tables: result.tables || [],
@@ -620,7 +620,7 @@ server.registerTool(
       return {
         content: [
           {
-            type: "text",
+            type: "text" as const,
             text: JSON.stringify({
               success: false,
               error: error.message,
@@ -645,7 +645,7 @@ server.registerTool(
       idempotentHint: true,
     },
   },
-  async (params) => {
+  async (params: Record<string, unknown>) => {
     try {
       const input = CleanMarkdownInputSchema.parse(params);
       const [cleanedContent, method] = cleanMarkdownContent(input.content);
@@ -653,7 +653,7 @@ server.registerTool(
       return {
         content: [
           {
-            type: "text",
+            type: "text" as const,
             text: JSON.stringify({
               success: true,
               cleaned_content: cleanedContent,
@@ -668,7 +668,7 @@ server.registerTool(
       return {
         content: [
           {
-            type: "text",
+            type: "text" as const,
             text: JSON.stringify({
               success: false,
               error: error.message,
