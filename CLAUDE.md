@@ -184,9 +184,13 @@ mistral-mcp-js/
 Deploys automatically via GitHub integration to Cloudflare Workers Builds.
 
 ```bash
-# Set API key secret (via Cloudflare dashboard or wrangler)
-npx wrangler secret put MISTRAL_API_KEY
+# Set API key secrets (via Cloudflare dashboard or wrangler)
+npx wrangler secret put MISTRAL_API_KEY           # User's API key
+npx wrangler secret put DEFAULT_MISTRAL_API_KEY   # Fallback key for users without their own
+npx wrangler secret put MCP_AUTH_KEY              # Optional: protect endpoint access
 ```
+
+**API Key Priority:** `?apiKey=` query param → `MISTRAL_API_KEY` → `DEFAULT_MISTRAL_API_KEY`
 
 ## Dependencies
 
