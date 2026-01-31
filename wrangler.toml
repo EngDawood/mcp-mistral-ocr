@@ -1,4 +1,4 @@
-name = "mistral-ocr-mcp-worker"
+name = "mcp-mistral-ocr"
 main = "src/worker.ts"
 compatibility_date = "2025-01-28"
 compatibility_flags = ["nodejs_compat"]
@@ -19,10 +19,10 @@ globs = ["**/*.js", "**/*.mjs"]
 # - fetch() (built-in to Workers but enhanced with nodejs_compat)
 
 [env.production]
-name = "mistral-ocr-mcp-worker"
+name = "mcp-mistral-ocr"
 
 [env.staging]
-name = "mistral-ocr-mcp-worker-staging"
+name = "mcp-mistral-ocr-staging"
 
 # Environment variables (public, non-sensitive)
 # For sensitive values like API keys, use: wrangler secret put MISTRAL_API_KEY
