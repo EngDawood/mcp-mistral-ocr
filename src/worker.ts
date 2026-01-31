@@ -689,7 +689,27 @@ export default {
   fetch: (request: Request, env: any, ctx: any) => {
     _env = env;
     const url = new URL(request.url);
+
+    // Check for MCP authentication (required if MCP_AUTH_KEY is set)
+    const mcpAuthKey = env.MCP_AUTH_KEY;
+    if (mcpAuthKey) {
+      // Accept auth key from Authorization header or query parameter
+      const authHeader = request.headers.get("Authorization");
+      const authFromHeader = authHeader?.replace("Bearer ", "");
+      const authFromQuery = url.searchParams.get("auth");
+      const providedAuth = authFromHeader || authFromQuery;
+
+      if (!providedAuth || providedAuth !== mcpAuthKey) {
+        return new Response(JSON.stringify({ error: "Unauthorized" }), {
+          status: 401,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+    }
+
+    // Optional: User can provide their own Mistral API key
     _userApiKey = url.searchParams.get("apiKey");
+
     return createMcpHandler(server)(request, env, ctx);
   },
 };
