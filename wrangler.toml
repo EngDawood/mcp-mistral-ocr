@@ -33,4 +33,4 @@ name = "mcp-mistral-ocr-staging"
 # To deploy:
 #   1. Set API key: wrangler secret put MISTRAL_API_KEY
 #   2. Deploy: wrangler deploy
-#   3. Your MCP server will be at: https://mistral-ocr-mcp-worker.<your-account>.workers.dev/mcp
+#   3. Your MCP server will be at: https://mcp-mistral-ocr.<your-account>.workers.dev/mcp
