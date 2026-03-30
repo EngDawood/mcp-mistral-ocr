@@ -18,6 +18,7 @@ import { createMcpHandler } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Mistral } from "@mistralai/mistralai";
 import { z } from "zod";
+import { parsePageSpec, markdownToText, cleanMarkdown, buildSchemaFromJson } from "./shared/utils.js";
 
 // Constants
 const DEFAULT_MODEL = "mistral-ocr-latest";
@@ -78,94 +79,6 @@ const CleanMarkdownInputSchema = z.object({
 // Utility Functions
 // =============================================================================
 
-function parsePageSpec(pageSpec: string): Set<number> {
-  const pages = new Set<number>();
-  const parts = pageSpec.split(",");
-
-  for (const part of parts) {
-    const trimmed = part.trim();
-    if (trimmed.includes("-")) {
-      if (trimmed.startsWith("-")) {
-        throw new Error(`Page numbers must be positive (got '${trimmed}')`);
-      }
-      const rangeParts = trimmed.split("-");
-      if (rangeParts.length !== 2) {
-        throw new Error(
-          `Invalid page range format: '${trimmed}' (expected format: '11-20')`
-        );
-      }
-      const start = parseInt(rangeParts[0].trim(), 10);
-      const end = parseInt(rangeParts[1].trim(), 10);
-      if (start < 1 || end < 1) {
-        throw new Error(`Page numbers must be positive (got ${start}-${end})`);
-      }
-      if (start > end) {
-        throw new Error(
-          `Invalid page range: ${start}-${end} (start must be <= end)`
-        );
-      }
-      for (let i = start; i <= end; i++) {
-        pages.add(i);
-      }
-    } else {
-      const pageNum = parseInt(trimmed, 10);
-      if (pageNum < 1) {
-        throw new Error(`Page numbers must be positive (got ${pageNum})`);
-      }
-      pages.add(pageNum);
-    }
-  }
-
-  return pages;
-}
-
-function markdownToText(content: string): string {
-  let text = content;
-  // Drop images
-  text = text.replace(/!\[.*?\]\(.*?\)/g, "");
-  // Keep link text
-  text = text.replace(/\[([^\]]+)\]\([^\)]+\)/g, "$1");
-  // Remove emphasis markers
-  text = text.replace(/[#*_`~]+/g, "");
-  // Normalize multiple newlines
-  text = text.replace(/\n{3,}/g, "\n\n");
-  return text.trim();
-}
-
-function cleanMarkdownContent(content: string): [string, string] {
-  const lines = content.split("\n");
-  const lineCounts = new Map<string, number>();
-
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (trimmed.length > 0) {
-      lineCounts.set(trimmed, (lineCounts.get(trimmed) || 0) + 1);
-    }
-  }
-
-  const repetitiveLines = new Set<string>();
-  for (const [line, count] of lineCounts.entries()) {
-    if (count >= 3) {
-      if (
-        !line.match(/^Page \d+/i) &&
-        !line.match(/^\[\d+\]/) &&
-        !line.match(/doi:/i) &&
-        !line.match(/^\d+$/)
-      ) {
-        repetitiveLines.add(line);
-      }
-    }
-  }
-
-  const cleanedLines = lines.filter((line) => {
-    const trimmed = line.trim();
-    return trimmed.length === 0 || !repetitiveLines.has(trimmed);
-  });
-
-  const cleanedContent = cleanedLines.join("\n");
-  return [cleanedContent, "lightweight inline deduplication"];
-}
-
 function getApiKey(): string {
   // Priority: user query param > user secret > default fallback
   const apiKey = _userApiKey || _env?.MISTRAL_API_KEY || _env?.DEFAULT_MISTRAL_API_KEY;
@@ -175,18 +88,6 @@ function getApiKey(): string {
     );
   }
   return apiKey;
-}
-
-function buildSchemaFromJson(jsonSchema: string): Record<string, any> {
-  try {
-    const schema = JSON.parse(jsonSchema);
-    if (typeof schema !== "object" || schema === null || Array.isArray(schema)) {
-      throw new Error("Schema must be a JSON object");
-    }
-    return schema;
-  } catch (e: any) {
-    throw new Error(`Invalid JSON schema: ${e.message}`);
-  }
 }
 
 async function processImageOcr(
@@ -302,13 +203,13 @@ async function processPdfOcr(
   // Extract tables
   let tables: any[] = [];
   if (tableFormat && ocrResponse.pages) {
-    for (const page of ocrResponse.pages) {
-      if (page.markdown?.tables) {
-        for (const table of page.markdown.tables) {
+    for (const page of ocrResponse.pages as any[]) {
+      if (page.tables) {
+        for (const table of page.tables) {
           tables.push({
             page: page.index,
             format: tableFormat,
-            content: tableFormat === "html" ? table.html : table.markdown,
+            content: (table as any)[tableFormat] ?? table.markdown,
           });
         }
       }
@@ -318,9 +219,9 @@ async function processPdfOcr(
   // Extract images
   let images: any[] = [];
   if (includeImages && ocrResponse.pages) {
-    for (const page of ocrResponse.pages) {
-      if (page.markdown?.images) {
-        for (const img of page.markdown.images) {
+    for (const page of ocrResponse.pages as any[]) {
+      if (page.images) {
+        for (const img of page.images) {
           images.push({
             page: page.index,
             url: img.url,
@@ -397,8 +298,7 @@ server.registerTool(
       );
 
       if (input.clean_output && result.content) {
-        const [cleanedContent] = cleanMarkdownContent(result.content);
-        result.content = cleanedContent;
+        result.content = cleanMarkdown(result.content);
         result.cleaned = true;
       }
 
@@ -457,8 +357,7 @@ server.registerTool(
       }
 
       if (input.clean_output) {
-        const [cleanedContent] = cleanMarkdownContent(finalContent);
-        finalContent = cleanedContent;
+        finalContent = cleanMarkdown(finalContent);
       }
 
       return {
@@ -649,7 +548,7 @@ server.registerTool(
   async (params: Record<string, unknown>) => {
     try {
       const input = CleanMarkdownInputSchema.parse(params);
-      const [cleanedContent, method] = cleanMarkdownContent(input.content);
+      const cleanedContent = cleanMarkdown(input.content);
 
       return {
         content: [
@@ -658,7 +557,7 @@ server.registerTool(
             text: JSON.stringify({
               success: true,
               cleaned_content: cleanedContent,
-              method,
+              method: "lightweight inline deduplication",
               original_length: input.content.length,
               cleaned_length: cleanedContent.length,
             }, null, 2),

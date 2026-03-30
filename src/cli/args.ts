@@ -1,7 +1,5 @@
 export const DEFAULT_OCR_MODEL = "mistral-ocr-latest";
 export const DEFAULT_AUDIO_MODEL = "voxtral-mini-latest";
-// Lines appearing this many times across a document are treated as headers/footers
-export const REPEAT_THRESHOLD = 3;
 
 export const AUDIO_EXTENSIONS = new Set([
   ".mp3", ".wav", ".m4a", ".ogg", ".flac", ".opus", ".webm", ".mp4", ".mpeg",
