@@ -4,7 +4,8 @@
   "description": "MCP server for PDF OCR processing using Mistral AI",
   "type": "module",
   "bin": {
-    "mistral-ocr-mcp": "dist/index.js"
+    "mistral-ocr-mcp": "dist/index.js",
+    "mistral-ocr-cli": "dist/cli/index.js"
   },
   "files": [
     "dist"
