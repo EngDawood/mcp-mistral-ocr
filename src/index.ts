@@ -40,7 +40,7 @@ const server = new McpServer({ name: "mistral_ocr_mcp", version: "1.0.0" });
 server.registerTool(
   "mistral_ocr_process_pdf",
   {
-    description: "Process a local PDF file and extract text or markdown using Mistral OCR. Supports page selection, table extraction, image extraction, and hyperlink extraction.",
+    description: "Process a local document file (PDF, DOCX, DOC, PPTX, XLSX, XLS) and extract text or markdown using Mistral OCR. Supports page selection, table extraction, image extraction, and hyperlink extraction.",
     inputSchema: ProcessPdfInputSchema as any,
     annotations: { readOnlyHint: false, idempotentHint: true, openWorldHint: true },
   },
@@ -70,7 +70,7 @@ server.registerTool(
 server.registerTool(
   "mistral_ocr_extract_structured",
   {
-    description: "Extract structured data from a PDF or image file using a JSON schema. Returns data matching the provided schema. Limited to 8 pages for annotation.",
+    description: "Extract structured data from a document (PDF, DOCX, DOC, PPTX, XLSX, XLS) or image file using a JSON schema. Returns data matching the provided schema. Limited to 8 pages for annotation.",
     inputSchema: ExtractStructuredInputSchema as any,
     annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   },
@@ -80,7 +80,7 @@ server.registerTool(
 server.registerTool(
   "mistral_ocr_extract_tables",
   {
-    description: "Extract all tables from a PDF file in HTML or markdown format. Saves results to a file alongside the PDF.",
+    description: "Extract all tables from a document file (PDF, DOCX, DOC, PPTX, XLSX, XLS) in HTML or markdown format. Saves results to a file alongside the source document.",
     inputSchema: ExtractTablesInputSchema as any,
     annotations: { readOnlyHint: false, idempotentHint: true, openWorldHint: true },
   },

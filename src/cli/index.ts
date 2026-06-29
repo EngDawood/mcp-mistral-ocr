@@ -1,42 +1,65 @@
 #!/usr/bin/env node
-/**
- * Mistral OCR + Audio Transcription CLI
- *
- * USAGE:
- *   mistral-ocr-cli <file.pdf|audio|directory>   # process local file or directory
- *   mistral-ocr-cli --url <url>                  # process PDF from URL directly
- *
- * OPTIONS (PDF / OCR):
- *   --md                  Output markdown (default: plain text)
- *   --txt                 Output plain text (default)
- *   --pages <spec>        Page selection, e.g. "1,8,9,11-20"
- *   --header <0|1>        Extract header (default: 1)
- *   --footer <0|1>        Extract footer (default: 1)
- *   --clean               Clean repetitive markdown headers (only with --md)
- *   --model <name>        OCR model (default: mistral-ocr-latest)
- *
- * OPTIONS (Audio transcription):
- *   --audio-model <name>  Transcription model (default: voxtral-mini-latest)
- *                         Supported audio: mp3 wav m4a ogg flac opus webm mp4
- *
- * SHARED OPTIONS:
- *   --api-key <key>       Mistral API key (overrides MISTRAL_API_KEY env var)
- *   --output <path>       Output file path (single-file/URL mode only)
- *   --help, -h            Show this help
- */
 
 import { promises as fs } from "fs";
 import * as path from "path";
 import { config as loadEnv } from "dotenv";
 import { parseArgs, printHelp } from "./args.js";
-import { isAudioFile, expandPath, confirmOutputPath, parsePageSpec } from "./utils.js";
-import { processUrl, processPdf } from "./ocr.js";
+import { isAudioFile, isImageFile, isDocumentFile, expandPath, confirmOutputPath, parsePageSpec, markdownToText, Spinner } from "./utils.js";
+import { processUrl, processPdf, processDocx, processImage } from "./ocr.js";
 import { transcribeAudio, findFiles } from "./audio.js";
+import {
+  DEFAULT_CONFIG_PATH,
+  DEFAULT_DOWNLOAD_DIR,
+  loadConfig,
+  resolveConfig,
+  runConfigCommand,
+  type FileTypeKey,
+  type CliConfig,
+} from "./config.js";
 
 loadEnv();
 
+function getFileType(filePath: string): FileTypeKey | null {
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === ".pdf" || ext === ".pptx" || ext === ".xlsx" || ext === ".xls") return "pdf";
+  if (ext === ".docx" || ext === ".doc") return "docx";
+  if (isImageFile(filePath)) return "img";
+  if (isAudioFile(filePath)) return "audio";
+  return null;
+}
+
+function buildArgs(argv: string[], config: CliConfig, type?: FileTypeKey) {
+  return parseArgs(argv, resolveConfig(config, type));
+}
+
+function resolveUrlSaveDir(config: CliConfig): string {
+  if (!config.allowedDirs) return process.cwd();
+  const cwd = path.resolve(process.cwd());
+  const allowed = config.allowedDirs.split(",").map(d => path.resolve(expandPath(d.trim())));
+  const inAllowed = allowed.some(d => cwd === d || cwd.startsWith(d + path.sep));
+  return inAllowed ? cwd : (config.downloadDir ? expandPath(config.downloadDir) : DEFAULT_DOWNLOAD_DIR);
+}
+
 async function main(): Promise<void> {
-  const args = parseArgs(process.argv.slice(2));
+  const argv = process.argv.slice(2);
+
+  // ── Pre-scan for --config <path> ──────────────────────────────────────────
+  let configPath = DEFAULT_CONFIG_PATH;
+  for (let i = 0; i < argv.length - 1; i++) {
+    if (argv[i] === "--config") { configPath = argv[i + 1]; break; }
+  }
+
+  // ── config subcommand ─────────────────────────────────────────────────────
+  if (argv[0] === "config") {
+    await runConfigCommand(argv.slice(1), configPath);
+    return;
+  }
+
+  // ── Load config ───────────────────────────────────────────────────────────
+  const config = await loadConfig(configPath);
+
+  // ── Parse args with global config as defaults ─────────────────────────────
+  const args = buildArgs(argv, config);
 
   if (!args.input && !args.url) {
     console.error("Error: Provide a file/directory path or --url.");
@@ -49,7 +72,7 @@ async function main(): Promise<void> {
   }
 
   if (args.clean && args.toTxt) {
-    process.stderr.write("  Warning: --clean only works with markdown output (--md). Ignoring --clean.\n");
+    process.stderr.write("  Warning: --clean only works with --md output. Ignoring --clean.\n");
     args.clean = false;
   }
 
@@ -64,26 +87,35 @@ async function main(): Promise<void> {
     }
   }
 
-  const outputExt = args.toTxt ? ".txt" : ".md";
-
   // ── URL mode ──────────────────────────────────────────────────────────────
   if (args.url) {
+    // URLs are treated as PDF type for config resolution
+    const urlArgs = buildArgs(argv, config, "pdf");
+    const outputExt = urlArgs.toTxt ? ".txt" : ".md";
+
     let filename: string;
     try {
       const u = new URL(args.url);
       const base = path.basename(decodeURIComponent(u.pathname));
-      filename = base && base.toLowerCase().endsWith(".pdf") ? base : "downloaded_document.pdf";
+      filename = base ? base.replace(/\.[^.]+$/, "") + outputExt : `downloaded_document${outputExt}`;
     } catch {
-      filename = "downloaded_document.pdf";
+      filename = `downloaded_document${outputExt}`;
     }
 
-    const defaultOut = path.join(process.cwd(), filename.replace(/\.pdf$/i, outputExt));
+    const saveDir = resolveUrlSaveDir(config);
+    const defaultOut = path.join(saveDir, filename);
     const outPath = await confirmOutputPath(args.outputPath ?? defaultOut, outputExt);
     if (!outPath) { console.log("Skipping processing."); return; }
 
     console.log(`Processing URL: ${args.url}`);
-    const { pageCount } = await processUrl(args.url, args, pageNumbers, outPath);
-    console.log(`  ✓ Completed: ${path.basename(outPath)} (${pageCount} pages)`);
+    const spinner = new Spinner();
+    try {
+      const { pageCount } = await processUrl(args.url, urlArgs, pageNumbers, outPath, (msg) => spinner.update(msg));
+      spinner.succeed(`${path.basename(outPath)} (${pageCount} pages)`);
+    } catch (err) {
+      spinner.fail((err as Error).message);
+      process.exit(1);
+    }
     console.log(`\nProcessing complete!\nFiles processed: 1/1`);
     return;
   }
@@ -100,40 +132,106 @@ async function main(): Promise<void> {
   }
 
   if (stat.isFile()) {
-    // ── Single file ──────────────────────────────────────────────────────────
+    // ── Single file — re-parse with type-specific config ──────────────────
+    const fileType = getFileType(inputPath);
+    const tArgs = fileType ? buildArgs(argv, config, fileType) : args;
+    const outputExt = tArgs.toTxt ? ".txt" : ".md";
+
     if (isAudioFile(inputPath)) {
       const defaultOut = inputPath.replace(/\.[^.]+$/, ".txt");
-      const outPath = await confirmOutputPath(args.outputPath ?? defaultOut, ".txt", "Re-transcribe");
+      const outPath = await confirmOutputPath(tArgs.outputPath ?? defaultOut, ".txt", "Re-transcribe");
       if (!outPath) { console.log("Skipping processing."); return; }
 
       console.log(`Transcribing audio: ${path.basename(inputPath)}`);
-      await transcribeAudio(inputPath, args, outPath);
-      console.log(`  ✓ Completed: ${path.basename(outPath)}`);
+      const spinner = new Spinner();
+      try {
+        await transcribeAudio(inputPath, tArgs, outPath, (msg) => spinner.update(msg));
+        spinner.succeed(path.basename(outPath));
+      } catch (err) {
+        spinner.fail((err as Error).message);
+        process.exit(1);
+      }
       console.log(`\nProcessing complete!\nFiles processed: 1/1`);
 
-    } else if (inputPath.toLowerCase().endsWith(".pdf")) {
-      const defaultOut = inputPath.replace(/\.pdf$/i, outputExt);
-      const outPath = await confirmOutputPath(args.outputPath ?? defaultOut, outputExt);
+    } else if (isDocumentFile(inputPath)) {
+      const defaultOut = inputPath.replace(/\.[^.]+$/, outputExt);
+      const outPath = await confirmOutputPath(tArgs.outputPath ?? defaultOut, outputExt);
       if (!outPath) { console.log("Skipping processing."); return; }
 
-      console.log(`Processing 1 PDF file...`);
       console.log(`Processing: ${path.basename(inputPath)}`);
-      const { pageCount } = await processPdf(inputPath, args, pageNumbers, outPath);
-      console.log(`  ✓ Completed: ${path.basename(outPath)} (${pageCount} pages)`);
+      const ext = path.extname(inputPath).toLowerCase();
+      const useDocx = (ext === ".docx" || ext === ".doc") && !tArgs.forceOcr;
+      const spinner = new Spinner();
+      const onStep = (msg: string) => spinner.update(msg);
+      try {
+        const { pageCount } = useDocx
+          ? await processDocx(inputPath, tArgs, outPath, onStep)
+          : await processPdf(inputPath, tArgs, pageNumbers, outPath, onStep);
+        spinner.succeed(`${path.basename(outPath)} (${pageCount} pages)`);
+      } catch (err) {
+        spinner.fail((err as Error).message);
+        process.exit(1);
+      }
+      console.log(`\nProcessing complete!\nFiles processed: 1/1`);
+
+    } else if (isImageFile(inputPath)) {
+      const defaultOut = inputPath.replace(/\.[^.]+$/, outputExt);
+      const outPath = await confirmOutputPath(tArgs.outputPath ?? defaultOut, outputExt);
+      if (!outPath) { console.log("Skipping processing."); return; }
+
+      console.log(`Processing image: ${path.basename(inputPath)}`);
+      const spinner = new Spinner();
+      try {
+        await processImage(inputPath, tArgs, outPath, (msg) => spinner.update(msg));
+        spinner.succeed(path.basename(outPath));
+      } catch (err) {
+        spinner.fail((err as Error).message);
+        process.exit(1);
+      }
+      console.log(`\nProcessing complete!\nFiles processed: 1/1`);
+
+    } else if (inputPath.toLowerCase().endsWith(".md")) {
+      const defaultOut = inputPath.replace(/\.md$/i, ".txt");
+      const outPath = await confirmOutputPath(tArgs.outputPath ?? defaultOut, ".txt", "Re-convert");
+      if (!outPath) { console.log("Skipping processing."); return; }
+
+      console.log(`Converting markdown to text: ${path.basename(inputPath)}`);
+      const mdContent = await fs.readFile(inputPath, "utf-8");
+      await fs.writeFile(outPath, markdownToText(mdContent), "utf-8");
+      console.log(`  ✓ Completed: ${path.basename(outPath)}`);
       console.log(`\nProcessing complete!\nFiles processed: 1/1`);
 
     } else {
       console.error(
-        `Error: Unsupported file type: ${path.basename(inputPath)}\n` +
-        `Supported: PDF files and audio (mp3 wav m4a ogg flac opus webm mp4 mpeg)`
+        `Error: Unsupported file type: ${path.extname(inputPath) || path.basename(inputPath)}\n` +
+        `Supported: PDF/DOCX/DOC/PPTX/XLSX/XLS, images (jpg jpeg png gif webp bmp tiff), markdown (.md), audio (mp3 wav m4a ogg flac opus webm mp4 mpeg)`
       );
       process.exit(1);
     }
 
   } else if (stat.isDirectory()) {
-    // ── Directory mode ────────────────────────────────────────────────────────
-    const { pdfs, audio } = await findFiles(inputPath, outputExt);
-    const total = pdfs.length + audio.length;
+    // ── Directory mode — build type-specific args for each batch ─────────
+    const pdfArgs   = buildArgs(argv, config, "pdf");
+    const docxArgs  = buildArgs(argv, config, "docx");
+    const imgArgs   = buildArgs(argv, config, "img");
+    const audioArgs = buildArgs(argv, config, "audio");
+
+    const pdfExt   = pdfArgs.toTxt  ? ".txt" : ".md";
+    const docxExt  = docxArgs.toTxt ? ".txt" : ".md";
+    const imgExt   = imgArgs.toTxt  ? ".txt" : ".md";
+
+    // findFiles uses global output ext for the "already done?" check
+    const globalExt = args.toTxt ? ".txt" : ".md";
+    const { pdfs: allPdfs, audio: allAudio, images: allImages, markdowns } = await findFiles(inputPath, globalExt);
+
+    const skipNonAudio = args.audioOnly;
+    const skipNonMd    = args.mdOnly;
+    const pdfs        = (skipNonAudio || skipNonMd) ? [] : allPdfs.filter(f => !f.toLowerCase().endsWith(".docx") && !f.toLowerCase().endsWith(".doc"));
+    const docxFiles   = (skipNonAudio || skipNonMd) ? [] : allPdfs.filter(f => f.toLowerCase().endsWith(".docx") || f.toLowerCase().endsWith(".doc"));
+    const audio       = (skipNonMd) ? [] : allAudio;
+    const images      = (skipNonAudio || skipNonMd) ? [] : allImages;
+    const activeMarkdowns = (skipNonAudio || !args.toTxt) ? [] : markdowns;
+    const total = pdfs.length + docxFiles.length + audio.length + images.length + activeMarkdowns.length;
 
     if (total === 0) {
       console.log(`Nothing to process — all files already have output files.`);
@@ -144,10 +242,10 @@ async function main(): Promise<void> {
     let processed = 0;
 
     for (const pdfFile of pdfs) {
-      const outPath = pdfFile.replace(/\.pdf$/i, outputExt);
+      const outPath = pdfFile.replace(/\.[^.]+$/, pdfExt);
       console.log(`Processing: ${path.basename(pdfFile)}`);
       try {
-        const { pageCount } = await processPdf(pdfFile, args, pageNumbers, outPath);
+        const { pageCount } = await processPdf(pdfFile, pdfArgs, pageNumbers, outPath);
         processed++;
         console.log(`  ✓ Completed: ${path.basename(outPath)} (${pageCount} pages)`);
       } catch (err) {
@@ -155,15 +253,55 @@ async function main(): Promise<void> {
       }
     }
 
+    for (const docxFile of docxFiles) {
+      const outPath = docxFile.replace(/\.[^.]+$/, docxExt);
+      console.log(`Processing: ${path.basename(docxFile)}`);
+      try {
+        const useDocx = !docxArgs.forceOcr;
+        const { pageCount } = useDocx
+          ? await processDocx(docxFile, docxArgs, outPath)
+          : await processPdf(docxFile, docxArgs, pageNumbers, outPath);
+        processed++;
+        console.log(`  ✓ Completed: ${path.basename(outPath)} (${pageCount} pages)`);
+      } catch (err) {
+        process.stderr.write(`  ✗ Error: ${path.basename(docxFile)}: ${(err as Error).message}\n`);
+      }
+    }
+
+    for (const imageFile of images) {
+      const outPath = imageFile.replace(/\.[^.]+$/, imgExt);
+      console.log(`Processing image: ${path.basename(imageFile)}`);
+      try {
+        await processImage(imageFile, imgArgs, outPath);
+        processed++;
+        console.log(`  ✓ Completed: ${path.basename(outPath)}`);
+      } catch (err) {
+        process.stderr.write(`  ✗ Error: ${path.basename(imageFile)}: ${(err as Error).message}\n`);
+      }
+    }
+
     for (const audioFile of audio) {
       const outPath = audioFile.replace(/\.[^.]+$/, ".txt");
       console.log(`Transcribing: ${path.basename(audioFile)}`);
       try {
-        await transcribeAudio(audioFile, args, outPath);
+        await transcribeAudio(audioFile, audioArgs, outPath);
         processed++;
         console.log(`  ✓ Completed: ${path.basename(outPath)}`);
       } catch (err) {
         process.stderr.write(`  ✗ Error: ${path.basename(audioFile)}: ${(err as Error).message}\n`);
+      }
+    }
+
+    for (const mdFile of activeMarkdowns) {
+      const outPath = mdFile.replace(/\.md$/i, ".txt");
+      console.log(`Converting: ${path.basename(mdFile)}`);
+      try {
+        const mdContent = await fs.readFile(mdFile, "utf-8");
+        await fs.writeFile(outPath, markdownToText(mdContent), "utf-8");
+        processed++;
+        console.log(`  ✓ Completed: ${path.basename(outPath)}`);
+      } catch (err) {
+        process.stderr.write(`  ✗ Error: ${path.basename(mdFile)}: ${(err as Error).message}\n`);
       }
     }
 

@@ -12,6 +12,7 @@ export const ProcessPdfInputSchema = z.object({
   table_format: z.enum(["markdown", "html"]).optional(),
   include_images: z.boolean().default(false),
   include_hyperlinks: z.boolean().default(false),
+  embed_images_base64: z.boolean().default(false),
 });
 
 export const ProcessUrlInputSchema = z.object({
@@ -30,6 +31,7 @@ export const ProcessUrlInputSchema = z.object({
   table_format: z.enum(["markdown", "html"]).optional(),
   include_images: z.boolean().default(false),
   include_hyperlinks: z.boolean().default(false),
+  embed_images_base64: z.boolean().default(false),
 });
 
 export const ProcessImageInputSchema = z.object({

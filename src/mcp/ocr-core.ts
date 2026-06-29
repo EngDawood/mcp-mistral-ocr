@@ -77,6 +77,56 @@ export function extractImagesFromPages(pages: any[]): any[] {
   return images;
 }
 
+export async function embedImagesInMarkdown(
+  markdown: string,
+  pages: any[]
+): Promise<string> {
+  // Build id → data URI map from all pages
+  const imageMap = new Map<string, string>();
+  for (const page of pages) {
+    if (!page.images) continue;
+    for (const img of page.images) {
+      if (!img.id || !img.imageBase64) continue;
+      const dataUri = img.imageBase64.startsWith("data:")
+        ? img.imageBase64
+        : `data:image/jpeg;base64,${img.imageBase64}`;
+      imageMap.set(img.id, dataUri);
+    }
+  }
+
+  if (imageMap.size === 0) return markdown;
+
+  // Replace each image placeholder and append OCR description
+  const placeholderPattern = /!\[([^\]]*)\]\(([^)]+)\)/g;
+  const replacements: Array<{ original: string; replacement: string }> = [];
+
+  for (const match of markdown.matchAll(placeholderPattern)) {
+    const [original, , href] = match;
+    // Strip extension to get the base image id (e.g. "img-0.jpeg" → "img-0")
+    const baseId = href.replace(/\.[^.]+$/, "");
+    const dataUri = imageMap.get(href) ?? imageMap.get(baseId);
+    if (!dataUri) continue;
+
+    let description = "";
+    try {
+      const [ocrText] = await processImageOcr(dataUri, "base64");
+      description = ocrText.trim();
+    } catch {
+      // OCR failed — embed image without description
+    }
+
+    const embeddedImg = `![${baseId}](${dataUri})`;
+    const caption = description ? `\n\n> **Image description:** ${description}` : "";
+    replacements.push({ original, replacement: embeddedImg + caption });
+  }
+
+  let result = markdown;
+  for (const { original, replacement } of replacements) {
+    result = result.replace(original, replacement);
+  }
+  return result;
+}
+
 export function extractHyperlinksFromContent(markdownContent: string): any[] {
   const pattern = /\[([^\]]+)\]\(([^\)]+)\)/g;
   const hyperlinks: any[] = [];
@@ -148,7 +198,8 @@ export async function processPdfOcr(
   extractFooter: boolean = true,
   tableFormat?: string,
   includeImages: boolean = false,
-  includeHyperlinks: boolean = false
+  includeHyperlinks: boolean = false,
+  embedImagesBase64: boolean = false
 ): Promise<OcrResult> {
   const client = new Mistral({ apiKey: getApiKey() });
 
@@ -162,7 +213,7 @@ export async function processPdfOcr(
   const ocrParams: any = {
     document: { type: "document_url", documentUrl: signed.url },
     model,
-    includeImageBase64: includeImages,
+    includeImageBase64: includeImages || embedImagesBase64,
   };
   if (!extractHeader) ocrParams.extractHeader = false;
   if (!extractFooter) ocrParams.extractFooter = false;
@@ -210,7 +261,9 @@ export async function processPdfOcr(
     pagesProcessed = Array.from({ length: totalPages }, (_, i) => i + 1);
   }
 
-  const markdownContent = markdownPages.join("\n\n");
+  let markdownContent = markdownPages.join("\n\n");
+  if (embedImagesBase64) markdownContent = await embedImagesInMarkdown(markdownContent, pageObjects);
+
   const result: OcrResult = { markdown_content: markdownContent, total_pages: totalPages, pages_processed: pagesProcessed, warnings };
 
   if (tableFormat) result.tables = extractTablesFromPages(pageObjects, tableFormat);

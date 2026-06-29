@@ -19,6 +19,8 @@ import {
 } from "./ocr-core.js";
 import { markdownToText, cleanMarkdown, parsePageSpec, buildSchemaFromJson } from "../shared/utils.js";
 
+const SUPPORTED_DOC_EXTENSIONS = [".pdf", ".docx", ".doc", ".pptx", ".xlsx", ".xls"];
+
 type ToolResult = {
   content: Array<{ type: "text"; text: string }>;
   isError?: boolean;
@@ -43,10 +45,14 @@ export async function handleProcessPdf(args: Record<string, unknown>): Promise<T
     const pdfPath = expandPath(params.file_path);
 
     try { await fs.access(pdfPath); } catch {
-      return err(`PDF file not found: ${params.file_path}`, "Please provide an absolute path to an existing PDF file.");
+      return err(`File not found: ${params.file_path}`, "Please provide an absolute path to an existing file.");
     }
-    if (!pdfPath.toLowerCase().endsWith(".pdf")) {
-      return err(`Expected a PDF file, got: ${path.extname(pdfPath)}`, "Ensure the file has a .pdf extension.");
+    const docExt = path.extname(pdfPath).toLowerCase();
+    if (!SUPPORTED_DOC_EXTENSIONS.includes(docExt)) {
+      return err(
+        `Unsupported file type: ${docExt}`,
+        `Supported formats: PDF, DOCX, DOC, PPTX, XLSX, XLS.`
+      );
     }
 
     let pageNumbers: Set<number> | undefined;
@@ -55,7 +61,7 @@ export async function handleProcessPdf(args: Record<string, unknown>): Promise<T
       catch (e: any) { return err(`Invalid page specification: ${e.message}`, "Use format like '1,5,10-15' for page selection."); }
     }
 
-    const ocrResult = await processPdfOcr(pdfPath, DEFAULT_MODEL, pageNumbers, params.extract_header, params.extract_footer, params.table_format, params.include_images, params.include_hyperlinks);
+    const ocrResult = await processPdfOcr(pdfPath, DEFAULT_MODEL, pageNumbers, params.extract_header, params.extract_footer, params.table_format, params.include_images, params.include_hyperlinks, params.embed_images_base64);
     let { markdown_content } = ocrResult;
 
     let cleaned = false;
@@ -68,7 +74,7 @@ export async function handleProcessPdf(args: Record<string, unknown>): Promise<T
 
     let outputFile: string | null = null;
     if (params.save_to_file) {
-      const outputPath = pdfPath.replace(/\.pdf$/i, params.output_format === "text" ? ".txt" : ".md");
+      const outputPath = pdfPath.replace(/\.[^.]+$/, params.output_format === "text" ? ".txt" : ".md");
       await fs.writeFile(outputPath, finalContent, "utf-8");
       outputFile = outputPath;
     }
@@ -112,7 +118,7 @@ export async function handleProcessUrl(args: Record<string, unknown>): Promise<T
       catch (e: any) { return err(`Invalid page specification: ${e.message}`, "Use format like '1,5,10-15' for page selection."); }
     }
 
-    const ocrResult = await processPdfOcr(downloadedPdf, DEFAULT_MODEL, pageNumbers, params.extract_header, params.extract_footer, params.table_format, params.include_images, params.include_hyperlinks);
+    const ocrResult = await processPdfOcr(downloadedPdf, DEFAULT_MODEL, pageNumbers, params.extract_header, params.extract_footer, params.table_format, params.include_images, params.include_hyperlinks, params.embed_images_base64);
     let { markdown_content } = ocrResult;
 
     let cleaned = false;
@@ -122,7 +128,7 @@ export async function handleProcessUrl(args: Record<string, unknown>): Promise<T
     }
 
     const finalContent = params.output_format === "text" ? markdownToText(markdown_content) : markdown_content;
-    const outputPath = downloadedPdf.replace(/\.pdf$/i, params.output_format === "text" ? ".txt" : ".md");
+    const outputPath = downloadedPdf.replace(/\.[^.]+$/, params.output_format === "text" ? ".txt" : ".md");
     await fs.writeFile(outputPath, finalContent, "utf-8");
 
     const pdfFile = params.keep_pdf ? downloadedPdf : null;
@@ -231,9 +237,10 @@ export async function handleExtractStructured(args: Record<string, unknown>): Pr
     const client = new Mistral({ apiKey: getApiKey() });
     const warnings: string[] = [];
     const ext = path.extname(filePath).toLowerCase();
+    const IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".tiff", ".tif", ".bmp"];
 
     let document: any;
-    if (ext === ".pdf") {
+    if (SUPPORTED_DOC_EXTENSIONS.includes(ext)) {
       const fileBytes = await fs.readFile(filePath);
       const uploaded = await client.files.upload({
         file: { fileName: path.basename(filePath), content: new Blob([fileBytes]) },
@@ -241,11 +248,13 @@ export async function handleExtractStructured(args: Record<string, unknown>): Pr
       });
       const signed = await client.files.getSignedUrl({ fileId: uploaded.id!, expiry: 1 });
       document = { type: "document_url", documentUrl: signed.url };
-    } else {
+    } else if (IMAGE_EXTENSIONS.includes(ext)) {
       const fileBytes = await fs.readFile(filePath);
-      const mimeTypes: Record<string, string> = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp" };
+      const mimeTypes: Record<string, string> = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp", ".avif": "image/avif", ".tiff": "image/tiff", ".tif": "image/tiff", ".bmp": "image/bmp" };
       const mimeType = mimeTypes[ext] ?? "image/png";
       document = { type: "image_url", imageUrl: `data:${mimeType};base64,${Buffer.from(fileBytes).toString("base64")}` };
+    } else {
+      return err(`Unsupported file type: ${ext}`, "Supported: PDF, DOCX, DOC, PPTX, XLSX, XLS, PNG, JPG, AVIF, TIFF.");
     }
 
     const ocrParams: any = {
@@ -300,10 +309,14 @@ export async function handleExtractTables(args: Record<string, unknown>): Promis
     const pdfPath = expandPath(params.file_path);
 
     try { await fs.access(pdfPath); } catch {
-      return err(`PDF file not found: ${params.file_path}`, "Please provide an absolute path to an existing PDF file.");
+      return err(`File not found: ${params.file_path}`, "Please provide an absolute path to an existing file.");
     }
-    if (!pdfPath.toLowerCase().endsWith(".pdf")) {
-      return err(`Expected a PDF file, got: ${path.extname(pdfPath)}`, "Ensure the file has a .pdf extension.");
+    const tableDocExt = path.extname(pdfPath).toLowerCase();
+    if (!SUPPORTED_DOC_EXTENSIONS.includes(tableDocExt)) {
+      return err(
+        `Unsupported file type: ${tableDocExt}`,
+        `Supported formats: PDF, DOCX, DOC, PPTX, XLSX, XLS.`
+      );
     }
 
     let pageNumbers: Set<number> | undefined;
@@ -318,7 +331,8 @@ export async function handleExtractTables(args: Record<string, unknown>): Promis
     let outputFile: string | null = null;
     if (params.save_to_file && tables.length > 0) {
       const ext = params.table_format === "html" ? ".html" : ".md";
-      const outputPath = path.join(path.dirname(pdfPath), `${path.basename(pdfPath, ".pdf")}_tables${ext}`);
+      const baseName = path.basename(pdfPath, tableDocExt);
+      const outputPath = path.join(path.dirname(pdfPath), `${baseName}_tables${ext}`);
       const tableContent = tables
         .map((t: any) =>
           params.table_format === "html"

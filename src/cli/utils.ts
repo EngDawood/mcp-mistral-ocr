@@ -2,13 +2,21 @@ import { promises as fs } from "fs";
 import * as path from "path";
 import * as os from "os";
 import * as readline from "readline";
-import { AUDIO_EXTENSIONS } from "./args.js";
+import { AUDIO_EXTENSIONS, IMAGE_EXTENSIONS, DOCUMENT_EXTENSIONS } from "./args.js";
 import { parsePageSpec, markdownToText, cleanMarkdown } from "../shared/utils.js";
 
 export { parsePageSpec, markdownToText, cleanMarkdown };
 
 export function isAudioFile(filePath: string): boolean {
   return AUDIO_EXTENSIONS.has(path.extname(filePath).toLowerCase());
+}
+
+export function isImageFile(filePath: string): boolean {
+  return IMAGE_EXTENSIONS.has(path.extname(filePath).toLowerCase());
+}
+
+export function isDocumentFile(filePath: string): boolean {
+  return DOCUMENT_EXTENSIONS.has(path.extname(filePath).toLowerCase());
 }
 
 export function expandPath(p: string): string {
@@ -66,4 +74,48 @@ export async function confirmOutputPath(
   const unique = await uniquePath(outPath, ext);
   console.log(`Output will be saved as: ${path.basename(unique)}`);
   return unique;
+}
+
+const SPINNER_FRAMES = ['|', '/', '-', '\\'];
+
+export class Spinner {
+  private interval: NodeJS.Timeout | null = null;
+  private frameIdx = 0;
+  private msg = '';
+  private isTTY = Boolean(process.stderr.isTTY);
+
+  update(msg: string): void {
+    this.msg = msg;
+    if (this.isTTY) {
+      process.stderr.write(`\r\x1b[K  ${SPINNER_FRAMES[this.frameIdx % 4]} ${msg}`);
+      if (!this.interval) {
+        this.interval = setInterval(() => {
+          this.frameIdx = (this.frameIdx + 1) % 4;
+          process.stderr.write(`\r\x1b[K  ${SPINNER_FRAMES[this.frameIdx]} ${this.msg}`);
+        }, 80);
+      }
+    } else {
+      process.stderr.write(`  → ${msg}\n`);
+    }
+  }
+
+  succeed(msg: string): void {
+    this._stop();
+    process.stderr.write(`  ✓ ${msg}\n`);
+  }
+
+  fail(msg: string): void {
+    this._stop();
+    process.stderr.write(`  ✗ ${msg}\n`);
+  }
+
+  private _stop(): void {
+    if (this.interval) {
+      clearInterval(this.interval);
+      this.interval = null;
+    }
+    if (this.isTTY) {
+      process.stderr.write('\r\x1b[K');
+    }
+  }
 }
