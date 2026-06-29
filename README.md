@@ -1,73 +1,28 @@
-# Mistral OCR MCP Server (Node.js/TypeScript)
+# mcp-mistral-ocr
 
-MCP (Model Context Protocol) server for PDF OCR processing using the Mistral AI API.
+MCP (Model Context Protocol) server **and** CLI for OCR and audio transcription using the Mistral AI API.
 
-Node.js/TypeScript implementation designed to be runnable via `npx`.
+Supports PDF, DOCX, DOC, PPTX, XLSX, XLS, images (JPEG, PNG, AVIF, TIFF), and audio files. Runs locally via stdio transport, installable with `npx`.
 
-## Features
-
-- **Process local PDFs**: Extract text/markdown from local PDF files
-- **Process URLs**: Download and process PDFs from URLs
-- **Process Images**: Direct image OCR (PNG, JPG, etc.)
-- **Extract Tables**: Extract tables in HTML or markdown format
-- **Structured Data**: Use JSON schemas to extract specific fields
-- **Page selection**: Process specific pages (e.g., "1,5-10")
-- **Markdown cleaning**: Remove repetitive headers from academic papers
-- **Hyperlinks & Images**: Extract hyperlinks and image metadata
-- **Arabic/English support**: Optimized for multilingual documents
-
-## Installation
-
-### Via npx (Recommended)
+## Quick Start
 
 ```bash
-npx mistral-ocr-mcp
+npx mcp-mistral-ocr
 ```
 
-### Local Development
+Requires `MISTRAL_API_KEY` in your environment.
 
-```bash
-# Clone the repository
-git clone https://github.com/yourusername/mistral-mcp-js.git
-cd mistral-mcp-js
+## Claude Desktop / Claude Code Setup
 
-# Install dependencies
-bun install
-
-# Build TypeScript
-bun run build
-
-# Run server
-bun run start
-```
-
-## Configuration
-
-1. Copy `.env.example` to `.env`:
-   ```bash
-   cp .env.example .env
-   ```
-
-2. Add your Mistral API key to `.env`:
-   ```
-   MISTRAL_API_KEY=your-api-key-here
-   ```
-
-3. Get your API key from: https://console.mistral.ai/api-keys
-
-## Usage with Claude Desktop
-
-### Via npx (Production)
-
-Add to your `claude_desktop_config.json`:
+Add to your MCP config (`claude_desktop_config.json` or `.mcp.json`):
 
 ```json
 {
   "mcpServers": {
-    "mistral_ocr_mcp": {
+    "mistral_ocr": {
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "mistral-ocr-mcp"],
+      "args": ["-y", "mcp-mistral-ocr"],
       "env": {
         "MISTRAL_API_KEY": "your-api-key-here"
       }
@@ -76,50 +31,63 @@ Add to your `claude_desktop_config.json`:
 }
 ```
 
-### Local Development
+Get your API key at: <https://console.mistral.ai/api-keys>
 
-```json
-{
-  "mcpServers": {
-    "mistral_ocr_mcp_js": {
-      "type": "stdio",
-      "command": "node",
-      "args": ["C:\\Users\\LEGION\\codebase\\mistral-mcp-js\\dist\\index.js"],
-      "env": {
-        "MISTRAL_API_KEY": "${MISTRAL_API_KEY}"
-      }
-    }
-  }
-}
-```
-
-## Available Tools
+## MCP Tools (6)
 
 | Tool | Description |
 |------|-------------|
-| `mistral_ocr_process_pdf` | Process a local PDF file |
-| `mistral_ocr_process_url` | Download and process PDF from URL |
-| `mistral_ocr_process_image` | Process image files (PNG, JPG, etc.) |
-| `mistral_ocr_extract_structured` | Extract structured data using JSON schema |
-| `mistral_ocr_extract_tables` | Extract tables in HTML or markdown format |
-| `mistral_ocr_clean_markdown` | Clean repetitive content from markdown |
+| `mistral_ocr_process_pdf` | Process local document (PDF, DOCX, DOC, PPTX, XLSX, XLS) |
+| `mistral_ocr_process_url` | Download and process a document from a URL |
+| `mistral_ocr_process_image` | OCR an image file (JPEG, PNG, AVIF, TIFF) |
+| `mistral_ocr_extract_structured` | Extract structured data using a JSON schema |
+| `mistral_ocr_extract_tables` | Extract tables in HTML or Markdown format |
+| `mistral_ocr_clean_markdown` | Remove repetitive headers/footers from OCR output |
 
-## Development
+All tools return JSON with `success`, `content`, `page_count`, and optional `tables`, `images`, `hyperlinks` fields.
+
+## CLI (`ocr`)
+
+The package also ships an `ocr` CLI for local batch processing:
 
 ```bash
-# Install dependencies
-bun install
+# Single file
+ocr document.pdf
+ocr report.docx --md
+ocr scan.png --txt
+ocr recording.mp3
 
-# Build TypeScript
-bun run build
+# Directory (processes all supported files)
+ocr ./docs/
 
-# Run server
-bun run start
+# URL
+ocr --url https://example.com/paper.pdf
 
-# Watch mode
-bun run dev
+# Page selection
+ocr large.pdf --pages 1,5-10
 
-# Test with MCP Inspector
+# Config (persistent per-type defaults)
+ocr config set outputFormat md
+ocr config pdf set clean true
+ocr config show
+```
+
+Outputs `.md` (default) or `.txt` (`--txt` flag). Skips files that already have an output.
+
+## Local Development
+
+```bash
+git clone https://github.com/EngDawood/mcp-mistral-ocr.git
+cd mcp-mistral-ocr
+npm install
+cp .env.example .env          # add MISTRAL_API_KEY
+npm run build
+node dist/index.js            # run MCP server
+```
+
+Test with MCP Inspector:
+
+```bash
 npx @modelcontextprotocol/inspector node dist/index.js
 ```
 

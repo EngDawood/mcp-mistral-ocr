@@ -99,7 +99,7 @@ Add to your Claude Desktop MCP configuration:
   "mcpServers": {
     "mistral_ocr_remote": {
       "type": "sse",
-      "url": "https://mistral-ocr-mcp-worker.<your-account>.workers.dev/mcp"
+      "url": "https://mistral-ocr-mcp-worker.engdawood.workers.dev/mcp"
     }
   }
 }

@@ -4,10 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Node.js/TypeScript MCP (Model Context Protocol) server for PDF OCR processing using the Mistral AI API. Available in two versions:
+Node.js/TypeScript MCP (Model Context Protocol) server and CLI for document OCR processing using the Mistral AI API. Available in two versions:
 
-1. **Local Version** (`src/index.ts`) - stdio transport, runnable via `npx`, supports file system operations
+1. **Local Version** (`src/index.ts`) - stdio transport MCP server + `mistral-ocr-cli` CLI, runnable via `npx`, supports file system operations
 2. **Cloudflare Worker Version** (`src/worker.ts`) - HTTP/SSE transport, deployed to Cloudflare's edge network, no filesystem access
+
+**Supported document formats (Mistral OCR API):** PDF, DOCX, DOC, PPTX, XLSX, XLS, and images (JPEG, PNG, AVIF, TIFF)
+
+**Note on DOCX/DOC:** The CLI uses `mammoth` + `turndown` for native Word parsing by default (preserves hyperlinks and tables). Use `--force-ocr` to route through Mistral OCR instead.
 
 **Status:** ✅ Both versions complete and merged to main - Local version (6 tools) + Worker version (5 tools)
 
@@ -51,7 +55,7 @@ gh pr create --base dev
 - **Validation:** Zod v3.25.76 schemas
 - **Transport:** stdio (standard MCP transport for CLI tools)
 - **Distribution:** npm package, runnable via `npx`
-- **Build Tool:** Bun (for faster installs) or npm
+- **Build Tool:** pnpm (for faster installs) or npm
 
 ### Cloudflare Worker Version (merged to main)
 
@@ -71,8 +75,8 @@ gh pr create --base dev
 
 | Tool Name | Description | Key Parameters |
 |-----------|-------------|----------------|
-| `mistral_ocr_process_pdf` | Process local PDF file | `file_path`, `output_format`, `pages`, `clean_output`, `table_format`, `include_images`, `include_hyperlinks` |
-| `mistral_ocr_process_url` | Download and process PDF from URL | `url`, `output_format`, `pages`, `keep_pdf`, `table_format`, `include_images`, `include_hyperlinks` |
+| `mistral_ocr_process_pdf` | Process local document file (PDF, DOCX, DOC, PPTX, XLSX, XLS) | `file_path`, `output_format`, `pages`, `clean_output`, `table_format`, `include_images`, `include_hyperlinks` |
+| `mistral_ocr_process_url` | Download and process document from URL | `url`, `output_format`, `pages`, `keep_pdf`, `table_format`, `include_images`, `include_hyperlinks` |
 | `mistral_ocr_process_image` | Process image file directly | `image_source`, `source_type`, `output_format`, `clean_output` |
 | `mistral_ocr_extract_structured` | Extract structured data with JSON schema | `file_path`, `json_schema`, `pages`, `annotation_type` |
 | `mistral_ocr_extract_tables` | Extract tables in HTML/markdown format | `file_path`, `table_format`, `pages` |
@@ -92,27 +96,37 @@ gh pr create --base dev
 
 ```
 mistral-mcp-js/
-├── .env                      # API key (git ignored)
-├── .env.example              # Template for API key
-├── .dev.vars.example         # Worker local dev vars template
+├── .env                        # API key (git ignored)
+├── .env.example                # Template for API key
+├── .dev.vars.example           # Worker local dev vars template
 ├── .gitignore
-├── .mcp.json                 # MCP client configuration
-├── CLAUDE.md                 # Project documentation (this file)
-├── README.md                 # Local version readme
-├── README.worker.md          # Worker version readme
-├── package.json              # npm package config
-├── tsconfig.json             # TypeScript config (local)
-├── tsconfig.worker.json      # TypeScript config (worker)
-├── wrangler.toml             # Cloudflare Worker config
-├── bun.lockb                 # Bun lockfile
+├── .mcp.json                   # MCP client configuration
+├── CLAUDE.md                   # Project documentation (this file)
+├── README.md                   # Local version readme
+├── README.worker.md            # Worker version readme
+├── package.json                # npm package config
+├── tsconfig.json               # TypeScript config (local)
+├── tsconfig.worker.json        # TypeScript config (worker)
+├── wrangler.toml               # Cloudflare Worker config
+├── bun.lockb                   # Bun lockfile
 ├── src/
-│   ├── index.ts              # Local MCP server (~1,500 lines, stdio)
-│   └── worker.ts             # Cloudflare Worker MCP server (~800 lines, HTTP/SSE)
-├── dist/                     # Compiled JS output (git ignored)
-│   ├── index.js              # Compiled local server
-│   ├── index.d.ts            # Type declarations
-│   └── index.js.map          # Source maps
-└── node_modules/             # Dependencies
+│   ├── index.ts                # Local MCP server entry point (stdio)
+│   ├── worker.ts               # Cloudflare Worker MCP server (HTTP/SSE)
+│   ├── mcp/
+│   │   ├── schemas.ts          # Zod validation schemas for all 6 MCP tools
+│   │   ├── handlers.ts         # MCP tool handler implementations
+│   │   └── ocr-core.ts         # Core OCR logic (processPdfOcr, processImageOcr, etc.)
+│   ├── cli/
+│   │   ├── index.ts            # CLI entry point (mistral-ocr-cli)
+│   │   ├── args.ts             # Argument parsing + ParsedConfig interface
+│   │   ├── ocr.ts              # OCR processing functions (processPdf, processDocx, processImage, processUrl)
+│   │   ├── audio.ts            # Audio transcription + findFiles (directory scanner)
+│   │   ├── utils.ts            # CLI utilities (isDocumentFile, isImageFile, expandPath, etc.)
+│   │   └── config.ts           # Config management (~/.mistral-ocr.json, per-type settings)
+│   └── shared/
+│       └── utils.ts            # Shared utilities (parsePageSpec, markdownToText, cleanMarkdown, buildSchemaFromJson)
+├── dist/                       # Compiled JS output (git ignored)
+└── node_modules/               # Dependencies
 ```
 
 ## Key Implementation Details
@@ -194,7 +208,7 @@ npx wrangler secret put MCP_AUTH_KEY              # Optional: protect endpoint a
 
 ## Dependencies
 
-**Installed (95 packages total):**
+**Key dependencies:**
 
 ```json
 {
@@ -203,10 +217,13 @@ npx wrangler secret put MCP_AUTH_KEY              # Optional: protect endpoint a
     "@mistralai/mistralai": "^1.5.0",
     "agents": "^0.3.6",
     "dotenv": "^16.4.7",
+    "mammoth": "^1.x",
+    "turndown": "^7.x",
     "zod": "^3.24.2"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260127.0",
+    "@types/turndown": "^5.x",
     "typescript": "^5.7.0",
     "@types/node": "^22.0.0",
     "wrangler": "^3.103.0"
@@ -217,7 +234,9 @@ npx wrangler secret put MCP_AUTH_KEY              # Optional: protect endpoint a
 }
 ```
 
-**Note:** The `overrides` section forces a single version of `@modelcontextprotocol/sdk` to resolve type conflicts between direct and transitive dependencies.
+**Notes:**
+- `mammoth` + `turndown`: DOCX/DOC native parsing — preserves hyperlinks and tables (CLI only)
+- `overrides`: Forces a single version of `@modelcontextprotocol/sdk` to resolve type conflicts
 
 ## Build & Run Commands
 
@@ -225,17 +244,17 @@ npx wrangler secret put MCP_AUTH_KEY              # Optional: protect endpoint a
 
 ```bash
 # Install dependencies
-bun install              # or: npm install
+npm install              # or: npm install
 
 # Build TypeScript
-bun run build            # or: npm run build
+npm run build            # or: npm run build
 # Compiles src/index.ts → dist/index.js
 
 # Run server (development)
 node dist/index.js
 
 # Watch mode (auto-rebuild on changes)
-bun run dev              # or: npm run dev
+npm run dev              # or: npm run dev
 
 # Run via npx (after publishing)
 npx mistral-ocr-mcp
@@ -321,18 +340,24 @@ All tools include MCP annotations for optimal client behavior:
 ### Compatibility Choices
 
 1. **Node 18+ Support**: Used `new Blob([buffer])` instead of Node 20's `openAsBlob()` to maintain broader compatibility
-2. **Parameter Naming**: Kept `snake_case` for all tool parameters (not camelCase) to match API conventions and enable drop-in replacement
-3. **Single-File Design**: Maintained ~1,500 line single-file architecture in `src/index.ts` for simplicity
+2. **Parameter Naming**: Kept `snake_case` for all tool parameters (not camelCase) to match API conventions
+3. **Modular Architecture**: Code split into `src/mcp/`, `src/cli/`, `src/shared/` modules for maintainability
 
 ### Key Challenges Solved
 
-1. **Markdown Cleaning**: Implemented lightweight inline deduplication (removes lines appearing 3+ times) since no npm equivalent exists for Python's `markdowncleaner` package. Preserves page numbers, footnotes, and DOIs.
+1. **DOCX Hyperlinks & Tables**: Mistral OCR processes DOCX visually and loses structural data. Fixed by routing DOCX/DOC through `mammoth` (Word XML parser) + `turndown` (HTML→markdown) in the CLI. Use `--force-ocr` to opt back to Mistral OCR.
 
-2. **API Parameter Support**: Added try/catch for `extractHeader`/`extractFooter` parameters that may not be supported in all API versions - gracefully falls back without them.
+2. **Multi-format Document Support**: Added `SUPPORTED_DOC_EXTENSIONS = [".pdf", ".docx", ".doc", ".pptx", ".xlsx", ".xls"]` in MCP handlers. All document types use `client.files.upload()` — Mistral infers type from filename extension.
 
-3. **Document Annotation**: Used type assertion `(params as any).documentAnnotationFormat = schema` for structured data extraction due to TypeScript SDK type limitations.
+3. **CLI Config System**: Per-user persistent defaults at `~/.mistral-ocr.json`. Supports global and per-type (`pdf`, `docx`, `img`, `audio`) settings. Priority: built-in defaults → global config → type config → CLI flags.
 
-4. **Path Expansion**: Manual `~` expansion for home directory since Node.js path module doesn't handle it automatically:
+4. **Markdown Cleaning**: Lightweight inline deduplication (removes lines appearing 3+ times). Preserves page numbers, footnotes, DOIs.
+
+5. **API Parameter Support**: Added try/catch for `extractHeader`/`extractFooter` — gracefully falls back without them if API version doesn't support them.
+
+6. **Document Annotation**: Used type assertion `(params as any).documentAnnotationFormat = schema` for structured extraction due to TypeScript SDK type limitations.
+
+7. **Path Expansion**: Manual `~` expansion since Node.js `path.resolve()` doesn't handle it:
    ```typescript
    p.startsWith("~") ? path.join(os.homedir(), p.slice(1)) : path.resolve(p)
    ```
