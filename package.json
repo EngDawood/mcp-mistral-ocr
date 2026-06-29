@@ -1,11 +1,11 @@
 {
-  "name": "mistral-ocr-mcp",
+  "name": "mcp-mistral-ocr",
   "version": "1.0.0",
-  "description": "MCP server for PDF OCR processing using Mistral AI",
+  "description": "MCP server and CLI for OCR and audio transcription using Mistral AI — supports PDF, DOCX, PPTX, XLSX, images",
   "type": "module",
   "bin": {
-    "mistral-ocr-mcp": "dist/index.js",
-    "mistral-ocr-cli": "dist/cli/index.js"
+    "mcp-mistral-ocr": "dist/index.js",
+    "ocr": "dist/cli/index.js"
   },
   "files": [
     "dist"
@@ -13,9 +13,9 @@
   "scripts": {
     "build": "tsc",
     "build:worker": "tsc --project tsconfig.worker.json",
+    "prepublishOnly": "npm run build",
     "start": "node dist/index.js",
     "dev": "tsc --watch",
-    "deploy": "wrangler deploy",
     "worker:dev": "wrangler dev",
     "worker:deploy": "wrangler deploy"
   },
@@ -27,20 +27,36 @@
     "mistral",
     "ocr",
     "pdf",
+    "docx",
+    "pptx",
+    "cli",
+    "audio",
+    "transcription",
     "model-context-protocol"
   ],
-  "author": "",
+  "author": "EngDawood <dawoodhormos@gmail.com>",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/EngDawood/mcp-mistral-ocr.git"
+  },
+  "homepage": "https://github.com/EngDawood/mcp-mistral-ocr#readme",
+  "bugs": {
+    "url": "https://github.com/EngDawood/mcp-mistral-ocr/issues"
+  },
   "dependencies": {
     "@mistralai/mistralai": "^1.5.0",
     "@modelcontextprotocol/sdk": "^1.12.1",
-    "agents": "^0.3.6",
     "dotenv": "^16.4.7",
+    "mammoth": "^1.12.0",
+    "turndown": "^7.2.4",
     "zod": "^3.24.2"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260127.0",
     "@types/node": "^22.0.0",
+    "@types/turndown": "^5.0.6",
+    "agents": "^0.3.6",
     "typescript": "^5.7.0",
     "wrangler": "^3.103.0"
   },
