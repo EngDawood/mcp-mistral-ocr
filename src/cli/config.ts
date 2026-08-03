@@ -16,6 +16,7 @@ export interface TypeConfig {
   clean?: boolean;
   keepImgs?: boolean;
   embedImgs?: boolean;
+  dropImgs?: boolean;
   forceOcr?: boolean;
   apiKey?: string;
 }
@@ -43,12 +44,13 @@ export const BUILT_IN_DEFAULTS: Required<Omit<TypeConfig, "apiKey">> = {
   clean: false,
   keepImgs: false,
   embedImgs: false,
+  dropImgs: false,
   forceOcr: false,
 };
 
 // ── Key metadata for validation ────────────────────────────────────────────────
 
-const BOOL_KEYS = new Set(["extractHeader", "extractFooter", "clean", "keepImgs", "embedImgs", "forceOcr"]);
+const BOOL_KEYS = new Set(["extractHeader", "extractFooter", "clean", "keepImgs", "embedImgs", "dropImgs", "forceOcr"]);
 const STRING_KEYS = new Set(["model", "audioModel", "apiKey", "downloadDir", "allowedDirs"]);
 const ENUM_KEYS: Record<string, string[]> = { outputFormat: ["md", "txt"] };
 const GLOBAL_ONLY_KEYS = new Set(["downloadDir", "allowedDirs"]);

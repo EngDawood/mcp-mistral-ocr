@@ -10,9 +10,9 @@ import { resolveApiKey, markdownToText, cleanMarkdown } from "./utils.js";
  * Calls client.ocr.process() with the given document URL and options.
  * Retries once without header/footer flags if the API version doesn't support them.
  *
- * includeImageBase64 is always requested so we can either:
+ * includeImageBase64 is requested only when we actually need the pixels:
  *   - OCR the image inline (default)
- *   - Keep as markdown image ref with --imgs
+ * It is skipped for --imgs (refs kept as-is) and --drop-imgs (refs removed).
  */
 async function runOcr(
   client: Mistral,
@@ -47,6 +47,18 @@ async function runOcr(
 }
 
 /**
+ * Remove every markdown image ref and collapse the blank lines left behind.
+ * Used by --drop-imgs for both the OCR path and the mammoth DOCX path
+ * (mammoth inlines images as base64 data URIs).
+ */
+function stripImageRefs(markdown: string): string {
+  return markdown
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, "")
+    .replace(/[ \t]+$/gm, "")
+    .replace(/\n{3,}/g, "\n\n");
+}
+
+/**
  * Build a map of imageId → base64 data URI from OCR response pages.
  */
 function buildImageMap(pages: Array<any>): Map<string, string> {
@@ -70,6 +82,7 @@ function buildImageMap(pages: Array<any>): Map<string, string> {
  * OCR every embedded image in the markdown and replace the placeholder with its text.
  * Placeholders look like: ![img-0.jpeg](img-0.jpeg)
  *
+ * If dropImgs is true, strips the placeholders without any OCR call.
  * If keepImgs is true, leaves them as-is (standard markdown image refs).
  */
 async function resolveImages(
@@ -78,9 +91,10 @@ async function resolveImages(
   client: Mistral,
   model: string,
   keepImgs: boolean,
-  embedImgs: boolean
+  embedImgs: boolean,
+  dropImgs: boolean
 ): Promise<string> {
-  if (keepImgs) {
+  if (keepImgs && !dropImgs) {
     // Just leave the markdown image refs intact — nothing to do
     return markdown;
   }
@@ -91,6 +105,9 @@ async function resolveImages(
   if (matches.length === 0) return markdown;
 
   let result = markdown;
+
+  // Remove every image ref outright — no base64, no OCR calls
+  if (dropImgs) return stripImageRefs(result);
 
   for (const match of matches) {
     const [fullMatch, , imgId] = match;
@@ -199,6 +216,9 @@ export async function processDocx(
   onStep?.("Converting to Markdown...");
   let markdown = td.turndown(result.value);
 
+  // mammoth inlines images as base64 data URIs — strip them when images aren't wanted
+  if (args.dropImgs) markdown = stripImageRefs(markdown);
+
   if (args.clean && !args.toTxt) {
     process.stderr.write("  Cleaning markdown content...\n");
     markdown = cleanMarkdown(markdown);
@@ -245,19 +265,19 @@ export async function processUrl(
   onStep?: (msg: string) => void
 ): Promise<{ outputPath: string; pageCount: number }> {
   const client = new Mistral({ apiKey: resolveApiKey(args.apiKey) });
-  const needsImageBase64 = !args.toTxt && !args.keepImgs;
+  const needsImageBase64 = !args.toTxt && !args.keepImgs && !args.dropImgs;
   onStep?.("Running OCR...");
   const response = await runOcr(client, url, args.model, args.extractHeader, args.extractFooter, needsImageBase64);
 
   let pages = response.pages as Array<any>;
   if (!args.toTxt) {
     const imageMap = buildImageMap(pages);
-    if (imageMap.size > 0) {
-      onStep?.(`Resolving ${imageMap.size} embedded image(s)...`);
+    if (imageMap.size > 0 || args.dropImgs) {
+      onStep?.(args.dropImgs ? "Removing images..." : `Resolving ${imageMap.size} embedded image(s)...`);
       const resolvedPages = await Promise.all(
         pages.map(async (page) => ({
           ...page,
-          markdown: await resolveImages(page.markdown, imageMap, client, args.model, args.keepImgs, args.embedImgs),
+          markdown: await resolveImages(page.markdown, imageMap, client, args.model, args.keepImgs, args.embedImgs, args.dropImgs),
         }))
       );
       pages = resolvedPages;
@@ -286,19 +306,19 @@ export async function processPdf(
     purpose: "ocr" as Parameters<typeof client.files.upload>[0]["purpose"],
   });
   const signed = await client.files.getSignedUrl({ fileId: uploaded.id, expiry: 1 });
-  const needsImageBase64 = !args.toTxt && !args.keepImgs;
+  const needsImageBase64 = !args.toTxt && !args.keepImgs && !args.dropImgs;
   onStep?.("Running OCR...");
   const response = await runOcr(client, signed.url, args.model, args.extractHeader, args.extractFooter, needsImageBase64);
 
   let pages = response.pages as Array<any>;
   if (!args.toTxt) {
     const imageMap = buildImageMap(pages);
-    if (imageMap.size > 0) {
-      onStep?.(`Resolving ${imageMap.size} embedded image(s)...`);
+    if (imageMap.size > 0 || args.dropImgs) {
+      onStep?.(args.dropImgs ? "Removing images..." : `Resolving ${imageMap.size} embedded image(s)...`);
       const resolvedPages = await Promise.all(
         pages.map(async (page) => ({
           ...page,
-          markdown: await resolveImages(page.markdown, imageMap, client, args.model, args.keepImgs, args.embedImgs),
+          markdown: await resolveImages(page.markdown, imageMap, client, args.model, args.keepImgs, args.embedImgs, args.dropImgs),
         }))
       );
       pages = resolvedPages;
