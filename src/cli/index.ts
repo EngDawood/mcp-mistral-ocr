@@ -76,6 +76,10 @@ async function main(): Promise<void> {
     args.clean = false;
   }
 
+  if (args.dropImgs && (args.keepImgs || args.embedImgs)) {
+    process.stderr.write("  Warning: --drop-imgs takes precedence over --imgs/--embed-imgs. Images will be removed.\n");
+  }
+
   let pageNumbers: Set<number> | null = null;
   if (args.pages) {
     try {

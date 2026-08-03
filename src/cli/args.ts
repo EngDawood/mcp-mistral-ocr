@@ -33,6 +33,7 @@ export interface CliArgs {
   toTxt: boolean;
   keepImgs: boolean;
   embedImgs: boolean;
+  dropImgs: boolean;
   mdOnly: boolean;
   audioOnly: boolean;
   forceOcr: boolean;
@@ -62,6 +63,8 @@ DOCUMENT / OCR OPTIONS:
                         Default: images are OCR'd and their text is included inline
   --embed-imgs          Embed images as base64 data URIs inline in the markdown,
                         and add an OCR description caption below each image
+  --drop-imgs           Drop images entirely: no image refs, no base64, no image OCR
+                        (fastest and cheapest — text-only markdown)
   --model <n>           OCR model (default: ${DEFAULT_OCR_MODEL})
 
 MARKDOWN OPTIONS:
@@ -100,7 +103,8 @@ CONFIG:
   --config <path>                   Use a custom config file path
 
   Use --no-* to override a config boolean back to false:
-  --no-clean, --no-imgs, --no-embed-imgs, --no-force-ocr, --no-header, --no-footer
+  --no-clean, --no-imgs, --no-embed-imgs, --no-drop-imgs, --no-force-ocr,
+  --no-header, --no-footer
 `);
 }
 
@@ -120,6 +124,7 @@ export interface ParsedConfig {
   clean?: boolean;
   keepImgs?: boolean;
   embedImgs?: boolean;
+  dropImgs?: boolean;
   forceOcr?: boolean;
   apiKey?: string;
 }
@@ -134,6 +139,7 @@ export function parseArgs(argv: string[], config: ParsedConfig = {}): CliArgs {
     toTxt:         (config.outputFormat ?? "txt") === "txt",
     keepImgs:      config.keepImgs      ?? false,
     embedImgs:     config.embedImgs     ?? false,
+    dropImgs:      config.dropImgs      ?? false,
     mdOnly:        false,
     audioOnly:     false,
     forceOcr:      config.forceOcr      ?? false,
@@ -164,6 +170,8 @@ export function parseArgs(argv: string[], config: ParsedConfig = {}): CliArgs {
       case "--no-imgs":       args.keepImgs = false; break;
       case "--embed-imgs":    args.embedImgs = true; break;
       case "--no-embed-imgs": args.embedImgs = false; break;
+      case "--drop-imgs":     args.dropImgs = true; break;
+      case "--no-drop-imgs":  args.dropImgs = false; break;
       case "--md-only":       args.mdOnly = true; break;
       case "--audio":         args.audioOnly = true; break;
       case "--force-ocr":     args.forceOcr = true; break;
