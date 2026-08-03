@@ -1,6 +1,8 @@
 {
   "name": "mcp-mistral-ocr",
   "version": "1.0.0",
+  	"author": "Dawood (https://engdawood.com/)",
+
   "description": "MCP server and CLI for OCR and audio transcription using Mistral AI — supports PDF, DOCX, PPTX, XLSX, images",
   "type": "module",
   "bin": {
@@ -34,7 +36,6 @@
     "transcription",
     "model-context-protocol"
   ],
-  "author": "EngDawood <dawoodhormos@gmail.com>",
   "license": "MIT",
   "repository": {
     "type": "git",
