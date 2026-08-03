@@ -41,12 +41,21 @@ function resolveUrlSaveDir(config: CliConfig): string {
 }
 
 async function main(): Promise<void> {
-  const argv = process.argv.slice(2);
+  const rawArgv = process.argv.slice(2);
 
-  // ── Pre-scan for --config <path> ──────────────────────────────────────────
+  // ── Pre-scan for --config <path>, stripping it from the args ──────────────
+  // It must be removed here: the `config` subcommand parser has no notion of
+  // flags, so a leftover `--config <path>` would be read as its command name.
   let configPath = DEFAULT_CONFIG_PATH;
-  for (let i = 0; i < argv.length - 1; i++) {
-    if (argv[i] === "--config") { configPath = argv[i + 1]; break; }
+  const argv: string[] = [];
+  for (let i = 0; i < rawArgv.length; i++) {
+    if (rawArgv[i] !== "--config") { argv.push(rawArgv[i]); continue; }
+    const value = rawArgv[++i];
+    if (value === undefined) {
+      console.error("Error: --config requires a path.");
+      process.exit(1);
+    }
+    configPath = expandPath(value);
   }
 
   // ── config subcommand ─────────────────────────────────────────────────────
