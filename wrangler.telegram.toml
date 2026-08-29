@@ -28,3 +28,5 @@ new_sqlite_classes = ["UserSession"]
 #   PROXY_SIGNING_KEY         random string; signs /f/<token> URLs
 #   MISTRAL_API_KEY           the owner's key (only the ADMIN_ID user gets it)
 #   ADMIN_ID                  your numeric Telegram user id
+[vars]
+ADMIN_ID = "801062947"
