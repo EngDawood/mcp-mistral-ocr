@@ -1,8 +1,7 @@
 {
   "name": "mcp-mistral-ocr",
   "version": "1.0.0",
-  	"author": "Dawood (https://engdawood.com/)",
-
+  "author": "Dawood (https://engdawood.com/)",
   "description": "MCP server and CLI for OCR and audio transcription using Mistral AI — supports PDF, DOCX, PPTX, XLSX, images",
   "type": "module",
   "bin": {
@@ -19,7 +18,10 @@
     "start": "node dist/index.js",
     "dev": "tsc --watch",
     "worker:dev": "wrangler dev",
-    "worker:deploy": "wrangler deploy"
+    "worker:deploy": "wrangler deploy",
+    "build:telegram": "tsc --project tsconfig.telegram.json",
+    "telegram:dev": "wrangler dev --config wrangler.telegram.toml",
+    "telegram:deploy": "wrangler deploy --config wrangler.telegram.toml"
   },
   "engines": {
     "node": ">=18.0.0"
