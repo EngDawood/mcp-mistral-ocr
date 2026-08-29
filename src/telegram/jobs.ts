@@ -151,6 +151,25 @@ async function runOcr(
 export async function validateUrl(
   url: string
 ): Promise<{ ok: true; contentType?: string; size?: number } | { ok: false; reason: string }> {
+  // Links are now fetched by our own Worker (Mistral's fetcher is blocked by some
+  // origins), so refuse anything pointing inward before we mint a signed token for it.
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    const isPrivate =
+      host === "localhost" ||
+      host.endsWith(".localhost") ||
+      host === "0.0.0.0" ||
+      host === "[::1]" ||
+      /^127\./.test(host) ||
+      /^10\./.test(host) ||
+      /^192\.168\./.test(host) ||
+      /^169\.254\./.test(host) ||
+      /^172\.(1[6-9]|2\d|3[01])\./.test(host);
+    if (isPrivate) return { ok: false, reason: "that address is not publicly reachable" };
+  } catch {
+    return { ok: false, reason: "that doesn't look like a valid URL" };
+  }
+
   let res: Response;
   try {
     res = await fetch(url, { method: "HEAD", redirect: "follow" });
