@@ -1,38 +1,22 @@
 /**
- * Per-job settings and the user's saved defaults.
+ * Per-job settings, the user's saved defaults, and the confirm panel built from them.
  *
- * Mirrors the CLI's priority chain (built-in defaults -> saved defaults -> per-job override),
- * but the panel produces a settings object directly: there is no argv in a chat, so `parseArgs`
- * has nothing to parse. The *shape* and the priority rule are what carry over, not the parser.
+ * Priority chain mirrors the CLI (`src/cli/config.ts`): built-in defaults -> the user's saved
+ * defaults -> per-job toggles. A job starts as a copy of the saved defaults; toggling a button
+ * changes only that job. "Save as default" promotes the job's settings explicitly.
+ *
+ * The panel emits a settings object directly rather than reusing `parseArgs` — there is no argv
+ * in a chat, so the parser would have nothing to parse. The priority rule is what carries over.
  */
 
-export type OutputFormat = "md" | "txt";
-
-/**
- * Image handling in markdown output.
- *
- * The CLI's default mode ("inline": OCR every embedded image as its own API call) is
- * deliberately absent. In a chat one tap of Send would fire hundreds of billed calls with no
- * visible progress, and on the Workers Free plan it exceeds the 50-subrequest cap outright.
- * That mode stays CLI-only.
- */
-export type ImageMode = "drop" | "keep" | "embed";
-
-export interface JobSettings {
-  format: OutputFormat;
-  images: ImageMode;
-  clean: boolean;
-  header: boolean;
-  footer: boolean;
-  /** Page spec like "1,5,10-15". Undefined means the whole document. */
-  pages?: string;
-}
+import type { ImageMode, JobSettings, OutputFormat } from "./types.js";
 
 export const DEFAULT_SETTINGS: JobSettings = {
   // Markdown by default: the result always arrives as a file, where structure is worth keeping.
-  // (The CLI defaults to txt; this is a deliberate divergence for the bot.)
+  // (The CLI defaults to txt; a deliberate divergence for the bot.)
   format: "md",
-  // Decision #10 -- see CLAUDE.telegram.md
+  // Decision #10 in CLAUDE.telegram.md — the CLI default would fire one billed API call per
+  // embedded image, invisibly, from a single tap of Send.
   images: "drop",
   clean: false,
   header: true,
@@ -52,7 +36,12 @@ function next<T>(cycle: T[], current: T): T {
   return cycle[(i + 1) % cycle.length];
 }
 
-/** Apply one panel button press. Returns a new settings object. */
+/**
+ * Apply one panel toggle, returning new settings.
+ *
+ * Page ranges are not toggled here — they need text input, so the router handles them
+ * as their own callback action.
+ */
 export function applyToggle(settings: JobSettings, key: string): JobSettings {
   const s = { ...settings };
   switch (key) {
@@ -71,10 +60,6 @@ export function applyToggle(settings: JobSettings, key: string): JobSettings {
     case "footer":
       s.footer = !s.footer;
       break;
-    case "pages":
-      // Cleared here; the router puts the user into "awaiting page spec" when it was unset.
-      s.pages = undefined;
-      break;
   }
   return s;
 }
@@ -82,38 +67,65 @@ export function applyToggle(settings: JobSettings, key: string): JobSettings {
 const IMAGE_LABEL: Record<ImageMode, string> = {
   drop: "removed",
   keep: "kept as links",
-  embed: "embedded (base64)",
+  embed: "embedded",
 };
 
-export function describe(settings: JobSettings): string {
-  return [
-    `Format: ${settings.format === "md" ? "Markdown" : "Plain text"}`,
-    `Images: ${IMAGE_LABEL[settings.images]}`,
-    `Clean repeated lines: ${settings.clean ? "on" : "off"}`,
-    `Header / footer: ${settings.header ? "on" : "off"} / ${settings.footer ? "on" : "off"}`,
-    `Pages: ${settings.pages ? settings.pages : "all"}`,
-  ].join("\n");
+const FORMAT_LABEL: Record<OutputFormat, string> = {
+  md: "Markdown",
+  txt: "Plain text",
+};
+
+/** One-line summary shown above the buttons. */
+export function describeSettings(settings: JobSettings, isAudio: boolean): string {
+  if (isAudio) {
+    // Pages, images and header/footer are all meaningless for a transcript.
+    return `Output: ${FORMAT_LABEL[settings.format]}`;
+  }
+  const bits = [
+    `output ${FORMAT_LABEL[settings.format].toLowerCase()}`,
+    `images ${IMAGE_LABEL[settings.images]}`,
+    `pages ${settings.pages || "all"}`,
+  ];
+  if (settings.clean) bits.push("cleaned");
+  if (!settings.header) bits.push("no header");
+  if (!settings.footer) bits.push("no footer");
+  return bits.join(" · ");
 }
 
-/** Inline keyboard rows for the confirm panel. `callback_data` stays well under 64 bytes. */
-export function panelKeyboard(jobId: string, settings: JobSettings) {
-  const cb = (action: string) => `${action}:${jobId}`;
-  return {
-    inline_keyboard: [
-      [
-        { text: `📄 ${settings.format === "md" ? "Markdown" : "Text"}`, callback_data: cb("t.format") },
-        { text: `🖼 Images: ${IMAGE_LABEL[settings.images]}`, callback_data: cb("t.images") },
-      ],
-      [
-        { text: `🧹 Clean: ${settings.clean ? "on" : "off"}`, callback_data: cb("t.clean") },
-        { text: `📑 Pages: ${settings.pages || "all"}`, callback_data: cb("t.pages") },
-      ],
-      [
-        { text: `⬆️ Header: ${settings.header ? "on" : "off"}`, callback_data: cb("t.header") },
-        { text: `⬇️ Footer: ${settings.footer ? "on" : "off"}`, callback_data: cb("t.footer") },
-      ],
-      [{ text: "💾 Save as my default", callback_data: cb("save") }],
-      [{ text: "▶️ Send", callback_data: cb("run") }],
-    ],
-  };
+/**
+ * Inline keyboard for the confirm panel.
+ *
+ * `callback_data` is capped at 64 bytes by the Bot API, so buttons carry only
+ * `<action>[:<key>]:<jobId>` — every byte of real state lives in the Durable Object.
+ * The router reads `parts[0]` as the action and `parts[parts.length - 1]` as the job id.
+ */
+export function buildPanel(jobId: string, settings: JobSettings, isAudio: boolean) {
+  const rows: Array<Array<{ text: string; callback_data: string }>> = [];
+
+  if (isAudio) {
+    rows.push([
+      { text: `📄 ${FORMAT_LABEL[settings.format]}`, callback_data: `t:format:${jobId}` },
+    ]);
+  } else {
+    rows.push([
+      { text: `📄 ${FORMAT_LABEL[settings.format]}`, callback_data: `t:format:${jobId}` },
+      { text: `🖼 Images: ${IMAGE_LABEL[settings.images]}`, callback_data: `t:images:${jobId}` },
+    ]);
+    rows.push([
+      { text: `📑 Pages: ${settings.pages || "all"}`, callback_data: `pages:${jobId}` },
+      { text: `🧹 Clean: ${settings.clean ? "on" : "off"}`, callback_data: `t:clean:${jobId}` },
+    ]);
+    rows.push([
+      { text: `⬆️ Header: ${settings.header ? "on" : "off"}`, callback_data: `t:header:${jobId}` },
+      { text: `⬇️ Footer: ${settings.footer ? "on" : "off"}`, callback_data: `t:footer:${jobId}` },
+    ]);
+  }
+
+  rows.push([
+    { text: "💾 Save as default", callback_data: `save:${jobId}` },
+    { text: "✖️ Cancel", callback_data: `cancel:${jobId}` },
+  ]);
+  rows.push([{ text: "▶️ Send", callback_data: `run:${jobId}` }]);
+
+  return { inline_keyboard: rows };
 }

@@ -128,9 +128,11 @@ export class UserSession {
       await this.ctx.storage.delete("awaitingPages");
       const job = await this.ctx.storage.get<PendingJob>(`job:${awaiting}`);
       if (!job) return void this.tg.sendMessage(chatId, "That job expired. Send the file again.");
-      job.settings.pages = text;
+      // "all" is the documented way to clear a range; storing it literally would make
+      // parsePageSpec throw and silently fall back to the whole document anyway.
+      job.settings.pages = /^all$/i.test(text) ? undefined : text;
       await this.ctx.storage.put(`job:${awaiting}`, job);
-      return void this.renderPanel(job, "Page range set.");
+      return void this.renderPanel(job, job.settings.pages ? "Page range set." : "Using all pages.");
     }
 
     if (/^https?:\/\//i.test(text)) return this.onUrl(msg, text);
