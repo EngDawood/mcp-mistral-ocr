@@ -1,0 +1,32 @@
+name = "mistral-ocr-telegram"
+main = "src/telegram/index.ts"
+compatibility_date = "2025-01-28"
+compatibility_flags = ["nodejs_compat"]
+
+# Node compatibility is needed by the @mistralai/mistralai SDK (Blob, Buffer).
+
+# OCR post-processing is real CPU work and scales with document size.
+# Only honoured on the Workers Paid plan (Standard usage model); on Free the
+# 10 ms per-invocation limit applies regardless and large documents will fail.
+[limits]
+cpu_ms = 300000
+
+# One object per Telegram user: holds their API key, saved defaults and pending
+# jobs, and runs jobs from an alarm (15 min wall time) rather than waitUntil,
+# which only extends execution for 30 seconds.
+[[durable_objects.bindings]]
+name = "USER_SESSION"
+class_name = "UserSession"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["UserSession"]
+
+# Secrets (set with: npx wrangler secret put NAME --config wrangler.telegram.toml)
+#   TELEGRAM_TOKEN            bot token from @BotFather
+#   TELEGRAM_WEBHOOK_SECRET   random string; also gates POST /setup
+#   PROXY_SIGNING_KEY         random string; signs /f/<token> URLs
+#   MISTRAL_API_KEY           the owner's key (only the ADMIN_ID user gets it)
+#   ADMIN_ID                  your numeric Telegram user id
+[vars]
+ADMIN_ID = "801062947"
