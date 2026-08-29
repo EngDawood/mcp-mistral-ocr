@@ -21,6 +21,9 @@ export const DEFAULT_SETTINGS: JobSettings = {
   clean: false,
   header: true,
   footer: true,
+  // Off by default: the file is the deliverable, and an excerpt of every run
+  // clutters the chat for anything longer than a page.
+  preview: false,
   pages: undefined,
 };
 
@@ -60,6 +63,9 @@ export function applyToggle(settings: JobSettings, key: string): JobSettings {
     case "footer":
       s.footer = !s.footer;
       break;
+    case "preview":
+      s.preview = !s.preview;
+      break;
   }
   return s;
 }
@@ -79,13 +85,14 @@ const FORMAT_LABEL: Record<OutputFormat, string> = {
 export function describeSettings(settings: JobSettings, isAudio: boolean): string {
   if (isAudio) {
     // Pages, images and header/footer are all meaningless for a transcript.
-    return `Output: ${FORMAT_LABEL[settings.format]}`;
+    return `Output: ${FORMAT_LABEL[settings.format]}${settings.preview ? " · preview on" : ""}`;
   }
   const bits = [
     `output ${FORMAT_LABEL[settings.format].toLowerCase()}`,
     `images ${IMAGE_LABEL[settings.images]}`,
     `pages ${settings.pages || "all"}`,
   ];
+  if (settings.preview) bits.push("preview on");
   if (settings.clean) bits.push("cleaned");
   if (!settings.header) bits.push("no header");
   if (!settings.footer) bits.push("no footer");
@@ -120,6 +127,10 @@ export function buildPanel(jobId: string, settings: JobSettings, isAudio: boolea
       { text: `⬇️ Footer: ${settings.footer ? "on" : "off"}`, callback_data: `t:footer:${jobId}` },
     ]);
   }
+
+  rows.push([
+    { text: `👁 Preview: ${settings.preview ? "on" : "off"}`, callback_data: `t:preview:${jobId}` },
+  ]);
 
   rows.push([
     { text: "💾 Save as default", callback_data: `save:${jobId}` },

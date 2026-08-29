@@ -90,8 +90,22 @@ async function handleProxy(path: string, env: Env): Promise<Response> {
   const verified = await verifyFileToken(env.PROXY_SIGNING_KEY, token);
   if (!verified.ok) return new Response(verified.reason, { status: 403 });
 
-  const tg = new TelegramApi(env.TELEGRAM_TOKEN);
-  const upstream = await fetch(tg.fileUrl(verified.filePath));
+  let upstreamUrl: string;
+  const headers: Record<string, string> = {};
+  if (verified.target.kind === "telegram") {
+    const tg = new TelegramApi(env.TELEGRAM_TOKEN);
+    upstreamUrl = tg.fileUrl(verified.target.filePath);
+  } else {
+    upstreamUrl = verified.target.url;
+    // Some origins refuse unfamiliar clients outright. We are fetching a link the
+    // user explicitly handed us, so present as an ordinary browser.
+    headers["user-agent"] =
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+      "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+    headers["accept"] = "*/*";
+  }
+
+  const upstream = await fetch(upstreamUrl, { headers, redirect: "follow" });
   if (!upstream.ok || !upstream.body) {
     return new Response("upstream fetch failed", { status: 502 });
   }

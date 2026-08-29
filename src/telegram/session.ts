@@ -9,7 +9,7 @@
  */
 
 import { TelegramApi, buildPreview } from "./api.js";
-import { signFileUrl } from "./proxy.js";
+import { signFileUrl, signSourceUrl } from "./proxy.js";
 import { runJob, validateUrl, explainError } from "./jobs.js";
 import { resolveSettings, applyToggle, buildPanel, describeSettings } from "./settings.js";
 import type { Env, JobSettings, PendingJob, TgMessage, TgUpdate } from "./types.js";
@@ -24,6 +24,13 @@ const DEFERRED_EXTENSIONS = new Set([".docx", ".doc"]);
 
 const MAX_AUDIO_SECONDS = 60 * 60;
 const JOB_TTL_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Mistral's document ceiling. Worth checking up front: when a file exceeds it,
+ * the API reports "File could not be fetched from url", which sends you hunting
+ * for a network fault that isn't there.
+ */
+const MAX_MISTRAL_BYTES = 50 * 1024 * 1024;
 
 function extOf(name: string): string {
   const i = name.lastIndexOf(".");
@@ -155,6 +162,16 @@ export class UserSession {
         chatId,
         status.message_id,
         `I can't use that link — ${check.reason}.`
+      );
+    }
+
+    if (check.size != null && check.size > MAX_MISTRAL_BYTES) {
+      return void this.tg.editMessageText(
+        chatId,
+        status.message_id,
+        `That file is ${fmtSize(check.size)} — over Mistral's 50 MB limit, so it can't be ` +
+          `processed as one document.\n\n` +
+          `Split it into parts under 50 MB first (qpdf or pdftk will do it), then send the parts.`
       );
     }
 
@@ -375,16 +392,23 @@ export class UserSession {
       const apiKey = await this.resolveApiKey(userId);
       if (!apiKey) throw new Error("401 no api key");
 
+      const origin = (await this.ctx.storage.get<string>("origin"))!;
+
       let sourceUrl: string;
-      if (job.kind === "url") {
-        sourceUrl = job.url!;
-      } else if (job.url) {
-        sourceUrl = job.url;
+      if (job.url) {
+        // Pasted links are proxied too, not handed to Mistral directly: their
+        // fetcher is refused by geo-blocked and reputation-filtered origins that
+        // answer Cloudflare without complaint. We stream, so nothing buffers.
+        sourceUrl = await signSourceUrl(
+          origin,
+          this.env.PROXY_SIGNING_KEY,
+          job.url,
+          job.fileName
+        );
       } else {
         await step("Locating file…");
         const file = await this.tg.getFile(job.fileId!);
         if (!file.file_path) throw new Error("Telegram did not return a file path");
-        const origin = (await this.ctx.storage.get<string>("origin"))!;
         sourceUrl = await signFileUrl(
           origin,
           this.env.PROXY_SIGNING_KEY,
@@ -406,12 +430,16 @@ export class UserSession {
 
       await this.tg.sendDocument(job.chatId, outName, result.content, summary);
 
-      const preview = buildPreview(result.content);
-      const notes = result.warnings.length ? `\n\n⚠️ ${result.warnings.join("\n⚠️ ")}` : "";
-      await this.tg.sendMessage(
-        job.chatId,
-        preview.text + (preview.truncated ? "\n\n… full text in the file above." : "") + notes
-      );
+      const notes = result.warnings.length ? `⚠️ ${result.warnings.join("\n⚠️ ")}` : "";
+
+      if (job.settings.preview) {
+        const preview = buildPreview(result.content);
+        const tail = preview.truncated ? "\n\n… full text in the file above." : "";
+        await this.tg.sendMessage(job.chatId, preview.text + tail + (notes ? `\n\n${notes}` : ""));
+      } else if (notes) {
+        // Warnings still need to reach the user even with the preview switched off.
+        await this.tg.sendMessage(job.chatId, notes);
+      }
 
       if (panelId) await this.tg.editMessageText(job.chatId, panelId, `${summary} ✅`);
     } catch (e) {

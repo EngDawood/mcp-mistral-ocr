@@ -41,6 +41,8 @@ export interface JobSettings {
   clean: boolean;
   header: boolean;
   footer: boolean;
+  /** Send an inline excerpt alongside the file. Off by default — the file is the deliverable. */
+  preview: boolean;
   /** Page spec like "1,5,10-15". Undefined means the whole document. */
   pages?: string;
 }
