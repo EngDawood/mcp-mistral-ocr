@@ -9,7 +9,7 @@
 import { Mistral } from "@mistralai/mistralai";
 import { parsePageSpec, markdownToText, cleanMarkdown } from "../shared/utils.js";
 import { signPartUrl } from "./proxy.js";
-import { discardSplit, readSplitStatus, startSplit } from "./splitter.js";
+import { discardSplit, readSplitStatus, startSplit, SplitterError } from "./splitter.js";
 import type { Env, JobSettings, PendingJob } from "./types.js";
 
 const OCR_MODEL = "mistral-ocr-latest";
@@ -235,6 +235,11 @@ export async function runJob(
 /** Turn a Mistral/plumbing error into something worth showing a chat user. */
 export function explainError(e: unknown): string {
   if (e instanceof UserFacingError) return e.message;
+  // Kept ahead of the generic 5xx branch below, which would otherwise read a
+  // status code out of the splitter's message and blame Mistral for it.
+  if (e instanceof SplitterError) {
+    return `The splitter could not run: ${e.message}. Try again in a minute.`;
+  }
   const msg = String((e as any)?.message ?? e);
 
   if (/1000|too many pages|page limit/i.test(msg)) {

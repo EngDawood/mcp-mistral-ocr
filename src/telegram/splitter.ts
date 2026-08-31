@@ -78,18 +78,74 @@ function stubFor(env: Env, name: string) {
   return getContainer(env.PDF_SPLITTER, name);
 }
 
+/** A failure from the splitter container, or from the runtime in front of it. */
+export class SplitterError extends Error {}
+
+/**
+ * How long to keep retrying a call the container never saw. Booting a cold
+ * instance can outlast the runtime's own patience, and the job behind this is
+ * a multi-minute split — waiting a few more seconds is cheaper than failing it.
+ */
+const CALL_RETRIES = 4;
+const CALL_RETRY_MS = 3000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Call the splitter, insisting on a JSON answer.
+ *
+ * The body is read as text first because only the *service* speaks JSON: when
+ * the instance itself cannot be reached, the Workers container runtime answers
+ * with a plain sentence ("Failed to start container: …"), and parsing that as
+ * JSON replaced a diagnosable failure with "Unexpected token 'F'".
+ *
+ * A non-JSON body also means the request never reached the service, so retrying
+ * it cannot duplicate a split — which is what makes riding out a cold start safe.
+ */
 async function call<T>(
   env: Env,
   name: string,
   path: string,
   init?: RequestInit
 ): Promise<T> {
-  const response = await stubFor(env, name).fetch(`http://splitter${path}`, init);
-  const body = (await response.json()) as T & { error?: string };
-  if (!response.ok) {
-    throw new Error(body?.error ?? `splitter ${path} answered ${response.status}`);
+  let unreached = "";
+
+  for (let attempt = 0; attempt <= CALL_RETRIES; attempt++) {
+    const response = await stubFor(env, name).fetch(`http://splitter${path}`, init);
+    const text = await response.text();
+
+    let body: (T & { error?: string }) | undefined;
+    try {
+      body = JSON.parse(text) as T & { error?: string };
+    } catch {
+      // Not the service talking, but the runtime in front of it.
+    }
+
+    if (body === undefined) {
+      unreached = `the splitter container did not answer (${response.status}: ${firstLine(text)})`;
+      if (attempt < CALL_RETRIES) {
+        await sleep(CALL_RETRY_MS);
+        continue;
+      }
+      break;
+    }
+
+    if (!response.ok) {
+      throw new SplitterError(body.error ?? `the splitter answered ${response.status}`);
+    }
+    return body;
   }
-  return body;
+
+  throw new SplitterError(unreached);
+}
+
+/** One line of an error body, short enough to put in a chat message. */
+function firstLine(text: string): string {
+  const line = (text.trim().split("\n")[0] ?? "").trim();
+  if (!line) return "empty response";
+  return line.length > 160 ? `${line.slice(0, 160)}…` : line;
 }
 
 export async function startSplit(
