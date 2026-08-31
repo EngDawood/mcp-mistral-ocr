@@ -14,9 +14,11 @@
 
 import { TelegramApi } from "./api.js";
 import { verifyFileToken } from "./proxy.js";
+import { fetchPart } from "./splitter.js";
 import type { Env, TgUpdate } from "./types.js";
 
 export { UserSession } from "./session.js";
+export { PdfSplitter } from "./splitter.js";
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -90,6 +92,23 @@ async function handleProxy(path: string, env: Env): Promise<Response> {
   const verified = await verifyFileToken(env.PROXY_SIGNING_KEY, token);
   if (!verified.ok) return new Response(verified.reason, { status: 403 });
 
+  // One part of a split document. Its bytes only exist on the splitter
+  // container's disk, so this hop goes inward rather than out to the internet.
+  if (verified.target.kind === "part") {
+    const { container, jobId, index } = verified.target;
+    const part = await fetchPart(env, container, jobId, index);
+    if (!part.ok || !part.body) {
+      return new Response("part fetch failed", { status: 502 });
+    }
+    return new Response(part.body, {
+      headers: {
+        "content-type": "application/pdf",
+        "content-length": part.headers.get("content-length") ?? "",
+        "cache-control": "no-store",
+      },
+    });
+  }
+
   let upstreamUrl: string;
   const headers: Record<string, string> = {};
   if (verified.target.kind === "telegram") {
@@ -143,7 +162,8 @@ async function handleSetup(request: Request, env: Env, url: URL): Promise<Respon
     results.description = await tg.setMyDescription(
       "I extract text from documents using Mistral OCR.\n\n" +
         "Send a PDF, PPTX, XLSX or image (up to 20 MB), an audio file to transcribe " +
-        "(up to 60 minutes), or a direct link to any of those (up to 50 MB). " +
+        "(up to 60 minutes), or a direct link to any of those. Linked PDFs over " +
+        "50 MB are split into parts and processed automatically. " +
         "You'll get a settings panel to pick the output format, page range and image " +
         "handling before anything runs.\n\n" +
         "Set your own Mistral API key with /key to get started."

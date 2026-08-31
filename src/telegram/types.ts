@@ -1,5 +1,8 @@
 /// <reference types="@cloudflare/workers-types" />
 
+// Type-only, so the cycle with splitter.ts costs nothing at runtime.
+import type { PdfSplitter } from "./splitter.js";
+
 /**
  * Shared types for the Telegram bot surface.
  *
@@ -20,6 +23,8 @@ export interface Env {
 
   // Bindings
   USER_SESSION: DurableObjectNamespace;
+  /** The PDF splitter container, used for documents over Mistral's 50 MB ceiling. */
+  PDF_SPLITTER: DurableObjectNamespace<PdfSplitter>;
 }
 
 // --- job model -------------------------------------------------------------
@@ -35,6 +40,14 @@ export type OutputFormat = "md" | "txt";
  */
 export type ImageMode = "drop" | "keep" | "embed";
 
+/**
+ * How a split document's output comes back.
+ *
+ * Only ever shown for jobs that will actually be split — for everything else
+ * there is exactly one output and the choice would be noise.
+ */
+export type PartsDelivery = "merge" | "separate";
+
 export interface JobSettings {
   format: OutputFormat;
   images: ImageMode;
@@ -45,6 +58,8 @@ export interface JobSettings {
   preview: boolean;
   /** Page spec like "1,5,10-15". Undefined means the whole document. */
   pages?: string;
+  /** One merged file, or one file per part. Only consulted for split jobs. */
+  parts: PartsDelivery;
 }
 
 /** What a job operates on, once the incoming message has been resolved. */
@@ -61,6 +76,11 @@ export interface PendingJob {
   fileSize?: number;
   /** Audio/video duration in seconds, when Telegram told us. */
   duration?: number;
+  /**
+   * Over Mistral's 50 MB limit, so the container has to split it first.
+   * Decided at intake from the link's content-length.
+   */
+  split?: boolean;
   chatId: number;
   /** The confirm panel message, so it can be edited in place. */
   panelMessageId?: number;

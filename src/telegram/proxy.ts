@@ -17,10 +17,16 @@
 const encoder = new TextEncoder();
 
 interface ProxyPayload {
-  /** Telegram file_path from getFile. Mutually exclusive with `u`. */
+  /** Telegram file_path from getFile. Mutually exclusive with `u` and `c`. */
   p?: string;
-  /** Absolute source URL, for links the user pasted. Mutually exclusive with `p`. */
+  /** Absolute source URL, for links the user pasted. Mutually exclusive with `p` and `c`. */
   u?: string;
+  /** Splitter container name, for one part of a split document. Needs `j` and `i`. */
+  c?: string;
+  /** Splitter job id. */
+  j?: string;
+  /** 1-based part index within that job. */
+  i?: number;
   /** Expiry, epoch seconds. */
   e: number;
 }
@@ -28,7 +34,8 @@ interface ProxyPayload {
 /** What a verified token points at. */
 export type ProxyTarget =
   | { kind: "telegram"; filePath: string }
-  | { kind: "url"; url: string };
+  | { kind: "url"; url: string }
+  | { kind: "part"; container: string; jobId: string; index: number };
 
 function b64urlEncode(bytes: Uint8Array): string {
   let bin = "";
@@ -93,6 +100,25 @@ export async function signSourceUrl(
   return mint(origin, secret, { u: sourceUrl }, fileName, ttlSeconds);
 }
 
+/**
+ * Mint a signed URL for one part of a split document.
+ *
+ * The part only exists on the splitter container's disk, so the token carries
+ * the container name as well as the job: the public `/f/` route runs in the
+ * plain Worker and has to find its way back to the same instance.
+ */
+export async function signPartUrl(
+  origin: string,
+  secret: string,
+  container: string,
+  jobId: string,
+  index: number,
+  fileName: string,
+  ttlSeconds = 1800
+): Promise<string> {
+  return mint(origin, secret, { c: container, j: jobId, i: index }, fileName, ttlSeconds);
+}
+
 async function mint(
   origin: string,
   secret: string,
@@ -130,6 +156,12 @@ export async function verifyFileToken(
 
   if (payload.p) return { ok: true, target: { kind: "telegram", filePath: payload.p } };
   if (payload.u) return { ok: true, target: { kind: "url", url: payload.u } };
+  if (payload.c && payload.j && payload.i != null) {
+    return {
+      ok: true,
+      target: { kind: "part", container: payload.c, jobId: payload.j, index: payload.i },
+    };
+  }
   return { ok: false, reason: "empty payload" };
 }
 

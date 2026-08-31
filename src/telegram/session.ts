@@ -10,7 +10,9 @@
 
 import { TelegramApi, buildPreview } from "./api.js";
 import { signFileUrl, signSourceUrl } from "./proxy.js";
-import { runJob, validateUrl, explainError } from "./jobs.js";
+import { runJob, runSplitJob, validateUrl, explainError } from "./jobs.js";
+import { containerNameFor } from "./splitter.js";
+import type { PartResult } from "./jobs.js";
 import { resolveSettings, applyToggle, buildPanel, describeSettings } from "./settings.js";
 import type { Env, JobSettings, PendingJob, TgMessage, TgUpdate } from "./types.js";
 import { MAX_DOWNLOAD_BYTES } from "./api.js";
@@ -165,16 +167,6 @@ export class UserSession {
       );
     }
 
-    if (check.size != null && check.size > MAX_MISTRAL_BYTES) {
-      return void this.tg.editMessageText(
-        chatId,
-        status.message_id,
-        `That file is ${fmtSize(check.size)} — over Mistral's 50 MB limit, so it can't be ` +
-          `processed as one document.\n\n` +
-          `Split it into parts under 50 MB first (qpdf or pdftk will do it), then send the parts.`
-      );
-    }
-
     let name = "document.pdf";
     try {
       const path = new URL(url).pathname;
@@ -185,16 +177,40 @@ export class UserSession {
     const ext = extOf(name);
     const kind = IMAGE_EXTENSIONS.has(ext) ? "image" : AUDIO_EXTENSIONS.has(ext) ? "audio" : "url";
 
+    // Over Mistral's ceiling the document has to be cut into parts first, and only
+    // a PDF can be cut. Decided here, from the link's content-length, so the panel
+    // can offer the merge/separate choice before anything runs.
+    let split = false;
+    if (check.size != null && check.size > MAX_MISTRAL_BYTES) {
+      if (ext !== ".pdf") {
+        return void this.tg.editMessageText(
+          chatId,
+          status.message_id,
+          `That file is ${fmtSize(check.size)} — over Mistral's 50 MB limit, and only ` +
+            `PDFs can be split into smaller parts.\n\n` +
+            `Convert it to PDF, or split it yourself and send the pieces.`
+        );
+      }
+      split = true;
+    }
+
     const job = await this.createJob({
       kind: kind === "url" ? "url" : kind,
       url,
       fileName: name,
       fileSize: check.size,
+      split,
       chatId,
     });
 
     await this.tg.deleteMessage(chatId, status.message_id);
-    await this.renderPanel(job, `Link OK${check.size ? ` · ${fmtSize(check.size)}` : ""}`);
+    const note = [
+      check.size ? fmtSize(check.size) : "Link OK",
+      split ? "over 50 MB, will be split" : null,
+    ]
+      .filter(Boolean)
+      .join(" · ");
+    await this.renderPanel(job, note);
   }
 
   private async onFile(msg: TgMessage) {
@@ -229,8 +245,8 @@ export class UserSession {
         chatId,
         `That file is ${fmtSize(size)}. Telegram only lets bots download files up to 20 MB — ` +
           `this is a hard limit on their side, not a setting I can change.\n\n` +
-          `Send me a direct link to it instead and Mistral will fetch it (up to 50 MB), ` +
-          `or run it through the CLI.`
+          `Send me a direct link to it instead — I fetch those myself, and a linked PDF ` +
+          `over 50 MB gets split into parts automatically.`
       );
     }
 
@@ -288,9 +304,12 @@ export class UserSession {
 
   private async renderPanel(job: PendingJob, note?: string) {
     const isAudio = job.kind === "audio";
+    const isSplit = Boolean(job.split);
     const header = `${job.fileName}${note ? ` · ${note}` : ""}`;
-    const body = `${header}\n\n${describeSettings(job.settings, isAudio)}\n\nTap to change, then Send.`;
-    const markup = buildPanel(job.id, job.settings, isAudio);
+    const body =
+      `${header}\n\n${describeSettings(job.settings, isAudio, isSplit)}\n\n` +
+      `Tap to change, then Send.`;
+    const markup = buildPanel(job.id, job.settings, isAudio, isSplit);
 
     if (job.panelMessageId) {
       await this.tg.editMessageText(job.chatId, job.panelMessageId, body, markup);
@@ -394,52 +413,9 @@ export class UserSession {
 
       const origin = (await this.ctx.storage.get<string>("origin"))!;
 
-      let sourceUrl: string;
-      if (job.url) {
-        // Pasted links are proxied too, not handed to Mistral directly: their
-        // fetcher is refused by geo-blocked and reputation-filtered origins that
-        // answer Cloudflare without complaint. We stream, so nothing buffers.
-        sourceUrl = await signSourceUrl(
-          origin,
-          this.env.PROXY_SIGNING_KEY,
-          job.url,
-          job.fileName
-        );
-      } else {
-        await step("Locating file…");
-        const file = await this.tg.getFile(job.fileId!);
-        if (!file.file_path) throw new Error("Telegram did not return a file path");
-        sourceUrl = await signFileUrl(
-          origin,
-          this.env.PROXY_SIGNING_KEY,
-          file.file_path,
-          job.fileName
-        );
-      }
-
-      const result = await runJob(job, apiKey, sourceUrl, step);
-
-      await step("Sending…");
-      const base = job.fileName.replace(/\.[^.]+$/, "") || "output";
-      const outName = `${base}.${job.settings.format}`;
-
-      const summary =
-        job.kind === "audio"
-          ? `${job.fileName} → transcript`
-          : `${job.fileName} → ${result.pagesProcessed}/${result.pageCount} pages`;
-
-      await this.tg.sendDocument(job.chatId, outName, result.content, summary);
-
-      const notes = result.warnings.length ? `⚠️ ${result.warnings.join("\n⚠️ ")}` : "";
-
-      if (job.settings.preview) {
-        const preview = buildPreview(result.content);
-        const tail = preview.truncated ? "\n\n… full text in the file above." : "";
-        await this.tg.sendMessage(job.chatId, preview.text + tail + (notes ? `\n\n${notes}` : ""));
-      } else if (notes) {
-        // Warnings still need to reach the user even with the preview switched off.
-        await this.tg.sendMessage(job.chatId, notes);
-      }
+      const summary = job.split
+        ? await this.runSplit(job, apiKey, origin, userId, step)
+        : await this.runWhole(job, apiKey, origin, step);
 
       if (panelId) await this.tg.editMessageText(job.chatId, panelId, `${summary} ✅`);
     } catch (e) {
@@ -450,6 +426,130 @@ export class UserSession {
       } else {
         await this.tg.sendMessage(job.chatId, `❌ ${explained}`);
       }
+    }
+  }
+
+  /** The ordinary path: one document, one OCR call, one file back. */
+  private async runWhole(
+    job: PendingJob,
+    apiKey: string,
+    origin: string,
+    step: (msg: string) => Promise<void>
+  ): Promise<string> {
+    let sourceUrl: string;
+    if (job.url) {
+      // Pasted links are proxied too, not handed to Mistral directly: their
+      // fetcher is refused by geo-blocked and reputation-filtered origins that
+      // answer Cloudflare without complaint. We stream, so nothing buffers.
+      sourceUrl = await signSourceUrl(
+        origin,
+        this.env.PROXY_SIGNING_KEY,
+        job.url,
+        job.fileName
+      );
+    } else {
+      await step("Locating file…");
+      const file = await this.tg.getFile(job.fileId!);
+      if (!file.file_path) throw new Error("Telegram did not return a file path");
+      sourceUrl = await signFileUrl(
+        origin,
+        this.env.PROXY_SIGNING_KEY,
+        file.file_path,
+        job.fileName
+      );
+    }
+
+    const result = await runJob(job, apiKey, sourceUrl, step);
+
+    await step("Sending…");
+    const summary =
+      job.kind === "audio"
+        ? `${job.fileName} → transcript`
+        : `${job.fileName} → ${result.pagesProcessed}/${result.pageCount} pages`;
+
+    await this.tg.sendDocument(job.chatId, outputName(job), result.content, summary);
+    await this.sendFollowUps(job, result.content, result.warnings);
+    return summary;
+  }
+
+  /**
+   * Over Mistral's 50 MB ceiling: the container cuts the document into parts and
+   * each one is OCR'd in turn.
+   *
+   * Nothing here touches the source bytes — the container holds those, and the
+   * parts reach Mistral through the signed `/f/` proxy. In merge mode we do
+   * accumulate the extracted *text*, which is a fraction of the PDF's size.
+   */
+  private async runSplit(
+    job: PendingJob,
+    apiKey: string,
+    origin: string,
+    userId: number,
+    step: (msg: string) => Promise<void>
+  ): Promise<string> {
+    const containerName = containerNameFor(userId);
+    const separate = job.settings.parts === "separate";
+    const base = baseName(job.fileName);
+    const collected: PartResult[] = [];
+
+    const outcome = await runSplitJob(
+      job,
+      apiKey,
+      { env: this.env, containerName, origin },
+      step,
+      async (part) => {
+        if (!separate) {
+          collected.push(part);
+          return;
+        }
+        // Send as we go, so output starts arriving while later parts still run.
+        const name = `${base}-part${String(part.part).padStart(2, "0")}.${job.settings.format}`;
+        await this.tg.sendDocument(
+          job.chatId,
+          name,
+          part.content,
+          `${job.fileName} · part ${part.part} · pages ${part.pageLabel}`
+        );
+      }
+    );
+
+    const plural = outcome.partCount === 1 ? "" : "s";
+    const summary =
+      `${job.fileName} → ${outcome.pagesProcessed}/${outcome.totalPages} pages ` +
+      `in ${outcome.partCount} part${plural}`;
+
+    const warnings = [...outcome.warnings];
+
+    if (separate) {
+      if (job.settings.preview) {
+        warnings.push("Preview skipped — every part arrived as its own file.");
+      }
+      await this.sendFollowUps(job, null, warnings);
+      return summary;
+    }
+
+    await step("Merging…");
+    const content = collected.map((part) => part.content).join("\n\n");
+    await this.tg.sendDocument(job.chatId, outputName(job), content, summary);
+    await this.sendFollowUps(job, content, warnings);
+    return summary;
+  }
+
+  /** Preview excerpt and warnings — the tail both delivery paths share. */
+  private async sendFollowUps(
+    job: PendingJob,
+    content: string | null,
+    warnings: string[]
+  ): Promise<void> {
+    const notes = warnings.length ? `⚠️ ${warnings.join("\n⚠️ ")}` : "";
+
+    if (content && job.settings.preview) {
+      const preview = buildPreview(content);
+      const tail = preview.truncated ? "\n\n… full text in the file above." : "";
+      await this.tg.sendMessage(job.chatId, preview.text + tail + (notes ? `\n\n${notes}` : ""));
+    } else if (notes) {
+      // Warnings still need to reach the user even with the preview switched off.
+      await this.tg.sendMessage(job.chatId, notes);
     }
   }
 
@@ -485,7 +585,8 @@ export class UserSession {
       "Documents: PDF, PPTX, XLSX, XLS (up to 20 MB — Telegram's limit for bots)",
       "Images: JPG, PNG, AVIF, TIFF",
       "Audio: MP3, WAV, FLAC, OGG, WEBM (up to 60 minutes)",
-      "Links: anything publicly reachable, up to 50 MB",
+      "Links: anything publicly reachable. PDFs over 50 MB are split into parts",
+      "  and processed automatically — you choose one merged file or one per part",
       "",
       "After you send something I'll show the settings — tap to change them, then Send.",
       "",
@@ -499,6 +600,15 @@ export class UserSession {
       "Word documents aren't supported here — use the CLI, which preserves links and tables.",
     ].join("\n");
   }
+}
+
+/** Strip any extension, so output can be named after the input. */
+function baseName(fileName: string): string {
+  return fileName.replace(/\.[^.]+$/, "") || "output";
+}
+
+function outputName(job: PendingJob): string {
+  return `${baseName(job.fileName)}.${job.settings.format}`;
 }
 
 function fmtSize(bytes: number): string {

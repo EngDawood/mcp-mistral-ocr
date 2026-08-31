@@ -9,7 +9,7 @@
  * in a chat, so the parser would have nothing to parse. The priority rule is what carries over.
  */
 
-import type { ImageMode, JobSettings, OutputFormat } from "./types.js";
+import type { ImageMode, JobSettings, OutputFormat, PartsDelivery } from "./types.js";
 
 export const DEFAULT_SETTINGS: JobSettings = {
   // Markdown by default: the result always arrives as a file, where structure is worth keeping.
@@ -25,6 +25,9 @@ export const DEFAULT_SETTINGS: JobSettings = {
   // clutters the chat for anything longer than a page.
   preview: false,
   pages: undefined,
+  // One file is what almost everyone wants; separate parts are for documents
+  // big enough that a single output is unwieldy.
+  parts: "merge",
 };
 
 export function resolveSettings(saved?: Partial<JobSettings> | null): JobSettings {
@@ -33,6 +36,7 @@ export function resolveSettings(saved?: Partial<JobSettings> | null): JobSetting
 
 const FORMAT_CYCLE: OutputFormat[] = ["md", "txt"];
 const IMAGE_CYCLE: ImageMode[] = ["drop", "keep", "embed"];
+const PARTS_CYCLE: PartsDelivery[] = ["merge", "separate"];
 
 function next<T>(cycle: T[], current: T): T {
   const i = cycle.indexOf(current);
@@ -66,6 +70,9 @@ export function applyToggle(settings: JobSettings, key: string): JobSettings {
     case "preview":
       s.preview = !s.preview;
       break;
+    case "parts":
+      s.parts = next(PARTS_CYCLE, s.parts);
+      break;
   }
   return s;
 }
@@ -81,8 +88,17 @@ const FORMAT_LABEL: Record<OutputFormat, string> = {
   txt: "Plain text",
 };
 
+const PARTS_LABEL: Record<PartsDelivery, string> = {
+  merge: "one file",
+  separate: "one per part",
+};
+
 /** One-line summary shown above the buttons. */
-export function describeSettings(settings: JobSettings, isAudio: boolean): string {
+export function describeSettings(
+  settings: JobSettings,
+  isAudio: boolean,
+  isSplit = false
+): string {
   if (isAudio) {
     // Pages, images and header/footer are all meaningless for a transcript.
     return `Output: ${FORMAT_LABEL[settings.format]}${settings.preview ? " · preview on" : ""}`;
@@ -92,6 +108,7 @@ export function describeSettings(settings: JobSettings, isAudio: boolean): strin
     `images ${IMAGE_LABEL[settings.images]}`,
     `pages ${settings.pages || "all"}`,
   ];
+  if (isSplit) bits.push(`output ${PARTS_LABEL[settings.parts]}`);
   if (settings.preview) bits.push("preview on");
   if (settings.clean) bits.push("cleaned");
   if (!settings.header) bits.push("no header");
@@ -106,7 +123,12 @@ export function describeSettings(settings: JobSettings, isAudio: boolean): strin
  * `<action>[:<key>]:<jobId>` — every byte of real state lives in the Durable Object.
  * The router reads `parts[0]` as the action and `parts[parts.length - 1]` as the job id.
  */
-export function buildPanel(jobId: string, settings: JobSettings, isAudio: boolean) {
+export function buildPanel(
+  jobId: string,
+  settings: JobSettings,
+  isAudio: boolean,
+  isSplit = false
+) {
   const rows: Array<Array<{ text: string; callback_data: string }>> = [];
 
   if (isAudio) {
@@ -125,6 +147,16 @@ export function buildPanel(jobId: string, settings: JobSettings, isAudio: boolea
     rows.push([
       { text: `⬆️ Header: ${settings.header ? "on" : "off"}`, callback_data: `t:header:${jobId}` },
       { text: `⬇️ Footer: ${settings.footer ? "on" : "off"}`, callback_data: `t:footer:${jobId}` },
+    ]);
+  }
+
+  // Only meaningful when the document is big enough to be split in the first place.
+  if (isSplit) {
+    rows.push([
+      {
+        text: `🧩 Parts: ${PARTS_LABEL[settings.parts]}`,
+        callback_data: `t:parts:${jobId}`,
+      },
     ]);
   }
 

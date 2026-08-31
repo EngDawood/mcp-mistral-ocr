@@ -1,6 +1,8 @@
 name = "mistral-ocr-telegram"
 main = "src/telegram/index.ts"
-compatibility_date = "2025-01-28"
+# Containers need a recent compatibility date; this was raised from 2025-01-28
+# when the PDF splitter was added.
+compatibility_date = "2025-10-01"
 compatibility_flags = ["nodejs_compat"]
 
 # Node compatibility is needed by the @mistralai/mistralai SDK (Blob, Buffer).
@@ -18,9 +20,43 @@ cpu_ms = 300000
 name = "USER_SESSION"
 class_name = "UserSession"
 
+# PDF splitter sidecar.
+#
+# Mistral refuses documents over 50 MB, and the Worker cannot split one itself:
+# every JS PDF library parses the whole file into memory and the isolate is
+# capped at 128 MB, so a 200 MB scan is impossible rather than merely slow.
+# The container has real memory and disk, runs qpdf, and the Worker only streams
+# the finished parts through to Mistral.
+#
+# `basic` (1 GiB / 4 GB disk) comfortably splits a few-hundred-MB PDF. Raise to
+# "standard-1" (4 GiB / 8 GB) if you hit larger ones — note memory is billed on
+# provisioned size for as long as the instance is awake, so bigger is not free.
+#
+# Deploying without Docker: `wrangler deploy` only needs a local Docker daemon
+# because `image` below is a Dockerfile path. Workers Builds builds it in CI
+# instead, so connect this Worker to the repo and set its deploy command to
+#     npx wrangler deploy --config wrangler.telegram.toml
+# It must run on the production branch: other branches default to
+# `wrangler versions upload`, which ships Worker code without publishing a new
+# image or rolling out containers. `wrangler dev` needs Docker too, so the
+# splitter cannot be exercised locally without it.
+[[containers]]
+class_name = "PdfSplitter"
+image = "./container/Dockerfile"
+instance_type = "basic"
+max_instances = 5
+
+[[durable_objects.bindings]]
+name = "PDF_SPLITTER"
+class_name = "PdfSplitter"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["UserSession"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["PdfSplitter"]
 
 # Secrets (set with: npx wrangler secret put NAME --config wrangler.telegram.toml)
 #   TELEGRAM_TOKEN            bot token from @BotFather

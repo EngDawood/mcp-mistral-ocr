@@ -8,7 +8,9 @@
 
 import { Mistral } from "@mistralai/mistralai";
 import { parsePageSpec, markdownToText, cleanMarkdown } from "../shared/utils.js";
-import type { JobSettings, PendingJob } from "./types.js";
+import { signPartUrl } from "./proxy.js";
+import { discardSplit, readSplitStatus, startSplit } from "./splitter.js";
+import type { Env, JobSettings, PendingJob } from "./types.js";
 
 const OCR_MODEL = "mistral-ocr-latest";
 const AUDIO_MODEL = "voxtral-mini-latest";
@@ -22,6 +24,9 @@ const AUDIO_MODEL = "voxtral-mini-latest";
  * in practice.
  */
 const CLEAN_CPU_GUARD_CHARS = 400_000;
+
+/** An error whose message is already fit to show a chat user verbatim. */
+export class UserFacingError extends Error {}
 
 export interface JobResult {
   content: string;
@@ -229,6 +234,7 @@ export async function runJob(
 
 /** Turn a Mistral/plumbing error into something worth showing a chat user. */
 export function explainError(e: unknown): string {
+  if (e instanceof UserFacingError) return e.message;
   const msg = String((e as any)?.message ?? e);
 
   if (/1000|too many pages|page limit/i.test(msg)) {
@@ -247,4 +253,175 @@ export function explainError(e: unknown): string {
     return `Mistral had a temporary problem (${msg.slice(0, 120)}). Try again.`;
   }
   return `Failed: ${msg.slice(0, 300)}`;
+}
+
+// --- oversized documents ---------------------------------------------------
+
+/** How long to wait for the container to download and split before giving up. */
+const SPLIT_TIMEOUT_MS = 11 * 60 * 1000;
+const SPLIT_POLL_MS = 2000;
+
+export interface SplitContext {
+  env: Env;
+  /** Which splitter container instance holds this job. */
+  containerName: string;
+  /** Public origin of the Worker, for the signed part URLs handed to Mistral. */
+  origin: string;
+}
+
+export interface PartResult extends JobResult {
+  /** 1-based part number. */
+  part: number;
+  /** Which source pages this part covers, in page-range notation. */
+  pageLabel: string;
+}
+
+export interface SplitOutcome {
+  totalPages: number;
+  partCount: number;
+  pagesProcessed: number;
+  warnings: string[];
+}
+
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function fmtMb(bytes: number): string {
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/**
+ * Process a document too big for Mistral to take in one piece.
+ *
+ * The container downloads and splits it; we never hold the source. Each part is
+ * handed to Mistral as a signed URL pointing back at our own proxy, which streams
+ * it out of the container — so the isolate never buffers a part either.
+ *
+ * Results are surfaced through `onPart` as each one lands rather than returned in
+ * a batch: with "one file per part" selected the user gets output while the rest
+ * is still running, and nothing accumulates here that the caller did not ask for.
+ */
+export async function runSplitJob(
+  job: PendingJob,
+  apiKey: string,
+  context: SplitContext,
+  onStep: StepFn,
+  onPart: (result: PartResult) => Promise<void>
+): Promise<SplitOutcome> {
+  if (!job.url) throw new UserFacingError("Only linked documents can be split.");
+
+  const { env, containerName, origin } = context;
+  const client = new Mistral({ apiKey });
+  const warnings: string[] = [];
+
+  await onStep("Starting the splitter…");
+  const jobId = await startSplit(env, containerName, {
+    url: job.url,
+    pages: job.settings.pages,
+  });
+
+  try {
+    const status = await awaitSplit(env, containerName, jobId, onStep);
+
+    if (status.missing?.length) {
+      warnings.push(
+        `Document has ${status.totalPages} pages; skipped ${status.missing.join(", ")}.`
+      );
+    }
+    if (status.oversize?.length) {
+      warnings.push(
+        `Skipped page${status.oversize.length > 1 ? "s" : ""} ${status.oversize.join(", ")} — ` +
+          `too large to process even alone.`
+      );
+    }
+
+    const parts = status.parts ?? [];
+    // The container already applied the page range, so re-filtering here would
+    // select part-local page numbers and quietly drop most of the document.
+    const partSettings: JobSettings = { ...job.settings, pages: undefined };
+
+    let pagesProcessed = 0;
+
+    for (const part of parts) {
+      const label = `part ${part.index}/${parts.length} (pages ${part.label})`;
+      await onStep(`OCR on ${label}…`);
+
+      const partUrl = await signPartUrl(
+        origin,
+        env.PROXY_SIGNING_KEY,
+        containerName,
+        jobId,
+        part.index,
+        `part-${part.index}.pdf`
+      );
+
+      const pages = await runOcr(
+        client,
+        { type: "document_url", documentUrl: partUrl },
+        partSettings
+      );
+
+      const built = buildContent(pages, partSettings);
+      pagesProcessed += built.pagesProcessed;
+      warnings.push(...built.warnings);
+
+      await onPart({ ...built, part: part.index, pageLabel: part.label });
+    }
+
+    return {
+      totalPages: status.totalPages ?? 0,
+      partCount: parts.length,
+      pagesProcessed,
+      // Per-part warnings are usually identical across parts (the clean-output CPU
+      // guard fires on every one), and ten copies of one sentence is not a report.
+      warnings: [...new Set(warnings)],
+    };
+  } finally {
+    // Frees the container's disk and lets it sleep sooner, which is what is billed.
+    await discardSplit(env, containerName, jobId);
+  }
+}
+
+/** Poll the splitter to completion, narrating progress into the panel. */
+async function awaitSplit(
+  env: Env,
+  containerName: string,
+  jobId: string,
+  onStep: StepFn
+) {
+  const deadline = Date.now() + SPLIT_TIMEOUT_MS;
+  let lastMessage = "";
+
+  while (Date.now() < deadline) {
+    const status = await readSplitStatus(env, containerName, jobId);
+
+    if (status.state === "error") {
+      throw new UserFacingError(status.error ?? "The splitter failed.");
+    }
+    if (status.state === "done") return status;
+
+    let message = "Preparing…";
+    if (status.state === "downloading") {
+      const done = fmtMb(status.downloaded ?? 0);
+      message = status.downloadTotal
+        ? `Downloading ${done} of ${fmtMb(status.downloadTotal)}…`
+        : `Downloading ${done}…`;
+    } else if (status.state === "reading") {
+      message = `Reading the PDF (${fmtMb(status.sourceBytes ?? 0)})…`;
+    } else if (status.state === "splitting") {
+      message = `Splitting — ${status.completedParts ?? 0}/${status.estimatedParts ?? "?"} parts…`;
+    }
+
+    // editMessageText rejects an unchanged body; only speak when something moved.
+    if (message !== lastMessage) {
+      lastMessage = message;
+      await onStep(message);
+    }
+    await wait(SPLIT_POLL_MS);
+  }
+
+  throw new UserFacingError(
+    "The document took too long to download and split. Try a page range, or a faster link."
+  );
 }
