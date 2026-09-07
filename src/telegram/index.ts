@@ -171,6 +171,8 @@ async function handleSetup(request: Request, env: Env, url: URL): Promise<Respon
     results.commands = await tg.setMyCommands([
       { command: "help", description: "What I can do and how" },
       { command: "settings", description: "Show your saved defaults" },
+      { command: "balance", description: "Credits remaining" },
+      { command: "usage", description: "What your recent jobs cost" },
       { command: "request", description: "Ask the owner for access" },
     ]);
   } catch (e: any) {

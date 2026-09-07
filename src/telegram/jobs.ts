@@ -72,11 +72,20 @@ function embedImages(markdown: string, pages: any[]): string {
   });
 }
 
-function buildContent(pages: any[], settings: JobSettings): JobResult {
+/**
+ * @param preFiltered The page range was pushed to Mistral, so `pages` is already
+ *   the requested subset. Filtering again would index the wrong rows and warn
+ *   about pages that were never missing.
+ */
+function buildContent(
+  pages: any[],
+  settings: JobSettings,
+  preFiltered = false
+): JobResult {
   const warnings: string[] = [];
 
   let selected: number[] | null = null;
-  if (settings.pages) {
+  if (settings.pages && !preFiltered) {
     try {
       const wanted = parsePageSpec(settings.pages);
       selected = [...wanted].filter((n) => n >= 1 && n <= pages.length);
@@ -122,33 +131,72 @@ function buildContent(pages: any[], settings: JobSettings): JobResult {
   };
 }
 
+/**
+ * Run OCR, optionally over a subset of pages.
+ *
+ * The subset is sent to Mistral rather than applied to its answer: pages we
+ * never ask for are pages we are never billed for, which is the whole
+ * difference between a five-page request and a four-hundred-page invoice.
+ *
+ * @param wanted 1-indexed page numbers, or null for the whole document.
+ * @returns `filtered` says whether the selection actually reached the API, so
+ *   the caller knows not to filter the response a second time.
+ */
 async function runOcr(
   client: Mistral,
   document: Record<string, unknown>,
-  settings: JobSettings
-): Promise<any[]> {
-  const params: Record<string, unknown> = {
+  settings: JobSettings,
+  wanted?: number[] | null
+): Promise<{ pages: any[]; filtered: boolean }> {
+  const base: Record<string, unknown> = {
     document,
     model: OCR_MODEL,
     includeImageBase64: settings.images === "embed",
   };
-  if (!settings.header) params.extractHeader = false;
-  if (!settings.footer) params.extractFooter = false;
+  if (!settings.header) base.extractHeader = false;
+  if (!settings.footer) base.extractFooter = false;
 
-  try {
+  // Mistral numbers pages from zero; parsePageSpec numbers them from one.
+  const selection = wanted && wanted.length ? wanted.map((n) => n - 1) : null;
+  const withSelection = selection ? { ...base, pages: selection } : base;
+
+  const attempt = async (params: Record<string, unknown>) => {
     const res = await client.ocr.process(params as any);
     return res.pages as any[];
+  };
+
+  try {
+    return { pages: await attempt(withSelection), filtered: Boolean(selection) };
   } catch (e: any) {
-    // Same graceful fallback the CLI uses: some API versions reject these.
     const msg = String(e?.message ?? e);
+
+    // Same graceful fallback the CLI uses: some API versions reject these.
     if (msg.includes("extractHeader") || msg.includes("extractFooter")) {
-      delete params.extractHeader;
-      delete params.extractFooter;
-      const res = await client.ocr.process(params as any);
-      return res.pages as any[];
+      delete base.extractHeader;
+      delete base.extractFooter;
+      const retry = selection ? { ...base, pages: selection } : base;
+      try {
+        return { pages: await attempt(retry), filtered: Boolean(selection) };
+      } catch (inner: any) {
+        if (selection && isPageRangeError(inner)) {
+          return { pages: await attempt(base), filtered: false };
+        }
+        throw inner;
+      }
+    }
+
+    // A range running past the end of the document. Fall back to the whole
+    // thing and let buildContent report which pages were missing — the answer
+    // the user got before page selection was pushed to the API.
+    if (selection && isPageRangeError(e)) {
+      return { pages: await attempt(base), filtered: false };
     }
     throw e;
   }
+}
+
+function isPageRangeError(e: unknown): boolean {
+  return /page|range|invalid|out of/i.test(String((e as any)?.message ?? e));
 }
 
 /**
@@ -265,10 +313,21 @@ export async function runJob(
       ? { type: "image_url", imageUrl: sourceUrl }
       : { type: "document_url", documentUrl: sourceUrl };
 
-  const pages = await runOcr(client, document, job.settings);
+  let wanted: number[] | null = null;
+  if (job.settings.pages) {
+    try {
+      wanted = [...parsePageSpec(job.settings.pages)].filter((n) => n >= 1);
+    } catch {
+      // An unparseable range keeps the old behaviour: OCR everything, and let
+      // buildContent explain itself in a warning.
+      wanted = null;
+    }
+  }
+
+  const { pages, filtered } = await runOcr(client, document, job.settings, wanted);
 
   await onStep("Building output…");
-  return buildContent(pages, job.settings);
+  return buildContent(pages, job.settings, filtered);
 }
 
 /** Turn a Mistral/plumbing error into something worth showing a chat user. */
@@ -290,8 +349,12 @@ export function explainError(e: unknown): string {
   if (/401|unauthor|invalid api key/i.test(msg)) {
     return "Mistral rejected the API key. Ask the owner to update it.";
   }
-  if (/429|rate limit/i.test(msg)) {
-    return "Mistral is rate-limiting the account. Wait a moment and try again.";
+  if (/429|rate limit|quota|spending limit/i.test(msg)) {
+    return (
+      "Mistral refused the request (429). That is either ordinary rate-limiting, " +
+      "which clears in a moment, or the account has hit its monthly spending " +
+      "limit, which does not. Try once more, then tell the owner."
+    );
   }
   if (/5\d\d|timeout|network/i.test(msg)) {
     return `Mistral had a temporary problem (${msg.slice(0, 120)}). Try again.`;
@@ -400,7 +463,7 @@ export async function runSplitJob(
         `part-${part.index}.pdf`
       );
 
-      const pages = await runOcr(
+      const { pages } = await runOcr(
         client,
         { type: "document_url", documentUrl: partUrl },
         partSettings

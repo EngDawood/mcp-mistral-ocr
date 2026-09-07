@@ -17,6 +17,15 @@ export interface Env {
   PROXY_SIGNING_KEY: string;
   /** Used only for the owner (ADMIN_ID). Never a fallback for other users. */
   MISTRAL_API_KEY?: string;
+  /**
+   * The key every other user falls back to when the owner has not pinned them
+   * to one of their own.
+   *
+   * Access is gated by credits, NOT by the absence of a key — see
+   * UserSession.refuseReason. Adding this secret without that gate in place
+   * would open the bot to everyone who finds it.
+   */
+  DEFAULT_MISTRAL_API_KEY?: string;
 
   // Config
   ADMIN_ID?: string;
