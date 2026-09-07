@@ -4,16 +4,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Node.js/TypeScript MCP (Model Context Protocol) server and CLI for document OCR processing using the Mistral AI API. Available in two versions:
+Node.js/TypeScript MCP (Model Context Protocol) server and CLI for document OCR processing using the Mistral AI API. Available in three surfaces:
 
 1. **Local Version** (`src/index.ts`) - stdio transport MCP server + `mistral-ocr-cli` CLI, runnable via `npx`, supports file system operations
 2. **Cloudflare Worker Version** (`src/worker.ts`) - HTTP/SSE transport, deployed to Cloudflare's edge network, no filesystem access
+3. **Telegram Bot** (`src/telegram/`) - Cloudflare Worker + Durable Object per user + a `qpdf` Container sidecar for splitting documents over Mistral's 50MB limit. Handles files that live inside Telegram with no local path or public URL. See [CLAUDE.telegram.md](./CLAUDE.telegram.md).
 
 **Supported document formats (Mistral OCR API):** PDF, DOCX, DOC, PPTX, XLSX, XLS, and images (JPEG, PNG, AVIF, TIFF)
 
-**Note on DOCX/DOC:** The CLI uses `mammoth` + `turndown` for native Word parsing by default (preserves hyperlinks and tables). Use `--force-ocr` to route through Mistral OCR instead.
+**Note on DOCX/DOC:** The CLI uses `mammoth` + `turndown` for native Word parsing by default (preserves hyperlinks and tables). Use `--force-ocr` to route through Mistral OCR instead. The Telegram bot defers DOCX/DOC entirely (points users at the CLI).
 
-**Status:** ✅ Both versions complete and merged to main - Local version (6 tools) + Worker version (5 tools)
+**Status:** ✅ Local version (6 tools), Worker version (5 tools), and Telegram bot all complete and merged to main
 
 ## Git Workflow
 
@@ -45,7 +46,7 @@ git push -u origin feature/my-feature
 gh pr create --base dev
 ```
 
-## Two Deployment Options
+## Three Deployment Options
 
 ### Local Version (main branch)
 
@@ -68,6 +69,15 @@ gh pr create --base dev
 - **Worker Name:** `mcp-mistral-ocr`
 - **Build Tool:** Cloudflare Workers Builds (automatic via GitHub integration)
 - **Limitations:** No filesystem access (use URLs or base64 instead)
+
+### Telegram Bot (merged to main)
+
+- **Runtime:** Cloudflare Workers + one Durable Object per Telegram user (`UserSession`) + a Container sidecar (`PdfSplitter`, runs `qpdf`)
+- **Entry point:** `src/telegram/index.ts` — routes `/tg/webhook`, `/f/<token>/<name>` (signed file proxy), `/setup`
+- **Worker Name:** `mistral-ocr-telegram` (separate Worker from the MCP one, config in `wrangler.telegram.toml`)
+- **Why a Container:** the Worker isolate is capped at 128MB, so a >50MB PDF (Mistral's ceiling) can't be split in-Worker. The container has real memory/disk, splits with `qpdf`, and the Worker only streams finished parts through — see [CLAUDE.telegram.md](./CLAUDE.telegram.md) for the full constraint analysis.
+- **Build Tool:** Cloudflare Workers Builds; `wrangler deploy` needs a local Docker daemon (or CI) to build the container image
+- **Limitations:** No filesystem; DOCX/DOC deferred to the CLI; 20MB Telegram upload cap (URLs bypass it, auto-split above 50MB)
 
 ## Implemented Tools
 
@@ -102,12 +112,16 @@ mistral-mcp-js/
 ├── .gitignore
 ├── .mcp.json                   # MCP client configuration
 ├── CLAUDE.md                   # Project documentation (this file)
+├── CLAUDE.telegram.md          # Telegram bot design + implementation record
 ├── README.md                   # Local version readme
 ├── README.worker.md            # Worker version readme
 ├── package.json                # npm package config
 ├── tsconfig.json               # TypeScript config (local)
 ├── tsconfig.worker.json        # TypeScript config (worker)
-├── wrangler.toml               # Cloudflare Worker config
+├── tsconfig.telegram.json      # TypeScript config (telegram bot)
+├── wrangler.toml               # Cloudflare Worker config (MCP)
+├── wrangler.telegram.toml      # Cloudflare Worker config (telegram bot + container)
+├── container/                  # PDF splitter sidecar (Dockerfile + Python/qpdf server)
 ├── bun.lockb                   # Bun lockfile
 ├── src/
 │   ├── index.ts                # Local MCP server entry point (stdio)
@@ -123,11 +137,52 @@ mistral-mcp-js/
 │   │   ├── audio.ts            # Audio transcription + findFiles (directory scanner)
 │   │   ├── utils.ts            # CLI utilities (isDocumentFile, isImageFile, expandPath, etc.)
 │   │   └── config.ts           # Config management (~/.mistral-ocr.json, per-type settings)
+│   ├── telegram/                # Telegram bot (Worker + Durable Objects), see CLAUDE.telegram.md
+│   │   ├── index.ts             # Worker entry: webhook, signed file proxy, /setup
+│   │   ├── session.ts           # UserSession Durable Object: state, jobs, alarm-driven runs
+│   │   ├── jobs.ts              # OCR job orchestration, error handling/retry
+│   │   ├── splitter.ts          # PdfSplitter Container client (qpdf-based, for >50MB PDFs)
+│   │   ├── api.ts               # Telegram Bot API client
+│   │   ├── proxy.ts             # Signed /f/<token> URL verification
+│   │   ├── settings.ts          # Per-user settings panel state
+│   │   └── types.ts             # Env + Telegram update types
 │   └── shared/
-│       └── utils.ts            # Shared utilities (parsePageSpec, markdownToText, cleanMarkdown, buildSchemaFromJson)
+│       ├── utils.ts            # Shared utilities (parsePageSpec, markdownToText, cleanMarkdown, buildSchemaFromJson)
+│       └── source-url.ts       # Share-link normalisation (Drive/Docs/Dropbox/GitHub → direct download)
+├── test/                       # node --test suite (`npm test`)
 ├── dist/                       # Compiled JS output (git ignored)
 └── node_modules/               # Dependencies
 ```
+
+## Share Links
+
+Pasted links are normalised before use by `normalizeSourceUrl()` in `src/shared/source-url.ts`,
+which every URL-accepting surface calls (Telegram `onUrl`, CLI `processUrl`, MCP
+`downloadPdfFromUrl`, Worker `mistral_ocr_process_url`):
+
+| Input | Rewritten to |
+|-------|--------------|
+| `drive.google.com/file/d/<ID>/view`, `/open?id=`, `/uc?id=` | `drive.usercontent.google.com/download?id=<ID>&export=download&confirm=t` |
+| `docs.google.com/document\|spreadsheets/d/<ID>/…` | `…/export?format=pdf` |
+| `docs.google.com/presentation/d/<ID>/…` | `…/export/pdf` (path segment, not a query param) |
+| `dropbox.com/…?dl=0` | `dl=1` |
+| `github.com/o/r/blob/…` | `raw.githubusercontent.com/…` |
+
+**`confirm=t` is load-bearing** — without it, Drive files over ~100 MB return the
+virus-scan interstitial as HTML instead of the file.
+
+**Public files only.** A Drive link must be shared "Anyone with the link"; there is
+no OAuth. When Google answers with HTML anyway, `validateUrl` reports it as a
+sharing problem rather than a malformed link.
+
+Filenames come from the response's `content-disposition` header, since a
+direct-download URL carries no name in its path — and the extension is what
+Mistral infers document type from.
+
+A third-party resolver API was evaluated and rejected: it only extracted the file
+id and rebuilt the same URL, while its filename/size are already in headers we
+fetch anyway — and it would have handed a third party a working share credential
+for every processed document.
 
 ## Key Implementation Details
 
@@ -213,20 +268,21 @@ npx wrangler secret put MCP_AUTH_KEY              # Optional: protect endpoint a
 ```json
 {
   "dependencies": {
+    "@cloudflare/containers": "^0.3.7",
     "@modelcontextprotocol/sdk": "^1.12.1",
     "@mistralai/mistralai": "^1.5.0",
-    "agents": "^0.3.6",
     "dotenv": "^16.4.7",
-    "mammoth": "^1.x",
-    "turndown": "^7.x",
+    "mammoth": "^1.12.0",
+    "turndown": "^7.2.4",
     "zod": "^3.24.2"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20260127.0",
-    "@types/turndown": "^5.x",
+    "@cloudflare/workers-types": "^4.20260702.1",
+    "@types/turndown": "^5.0.6",
+    "agents": "^0.3.6",
     "typescript": "^5.7.0",
     "@types/node": "^22.0.0",
-    "wrangler": "^3.103.0"
+    "wrangler": "~4.105.0"
   },
   "overrides": {
     "@modelcontextprotocol/sdk": "^1.12.1"
@@ -236,6 +292,7 @@ npx wrangler secret put MCP_AUTH_KEY              # Optional: protect endpoint a
 
 **Notes:**
 - `mammoth` + `turndown`: DOCX/DOC native parsing — preserves hyperlinks and tables (CLI only)
+- `@cloudflare/containers`: Backs the Telegram bot's `PdfSplitter` sidecar (Worker-side client for the `qpdf` container)
 - `overrides`: Forces a single version of `@modelcontextprotocol/sdk` to resolve type conflicts
 
 ## Build & Run Commands
@@ -291,6 +348,33 @@ npx @modelcontextprotocol/inspector
 - `dist/index.js` - Compiled server with shebang (`#!/usr/bin/env node`)
 - `dist/index.d.ts` - TypeScript type declarations
 - `dist/index.js.map` - Source maps for debugging
+
+### Telegram Bot
+
+```bash
+# Type-check
+npm run build:telegram
+# Runs: tsc --project tsconfig.telegram.json
+
+# Local development (needs Docker running — the PdfSplitter container builds locally)
+npm run telegram:dev
+# Runs: wrangler dev --config wrangler.telegram.toml
+
+# Deploy (also needs Docker locally, or run via Workers Builds CI on the production branch)
+npm run telegram:deploy
+# Runs: wrangler deploy --config wrangler.telegram.toml
+
+# Register the webhook + bot commands (one-shot, after first deploy)
+curl -X POST "https://<worker-url>/setup?secret=<TELEGRAM_WEBHOOK_SECRET>"
+
+# Secrets (per name, prompts for value)
+npx wrangler secret put TELEGRAM_TOKEN --config wrangler.telegram.toml
+npx wrangler secret put TELEGRAM_WEBHOOK_SECRET --config wrangler.telegram.toml
+npx wrangler secret put PROXY_SIGNING_KEY --config wrangler.telegram.toml
+npx wrangler secret put MISTRAL_API_KEY --config wrangler.telegram.toml
+```
+
+See [CLAUDE.telegram.md](./CLAUDE.telegram.md) for architecture, constraints, and the PDF splitter design.
 
 ## Response Format
 

@@ -3,6 +3,7 @@ import { promises as fs } from "fs";
 import * as path from "path";
 import * as os from "os";
 import { parsePageSpec } from "../shared/utils.js";
+import { normalizeSourceUrl, filenameFromContentDisposition } from "../shared/source-url.js";
 import type { OcrResult } from "./schemas.js";
 
 export const DEFAULT_MODEL = "mistral-ocr-latest";
@@ -143,17 +144,24 @@ export function extractHyperlinksFromContent(markdownContent: string): any[] {
 }
 
 export async function downloadPdfFromUrl(url: string, outputDir?: string): Promise<string> {
-  const urlObj = new URL(url);
-  let filename = path.basename(urlObj.pathname);
+  // Drive/Docs/Dropbox/GitHub links serve a viewer page, not the document.
+  const source = normalizeSourceUrl(url);
+  const response = await fetch(source.url);
+  if (!response.ok) {
+    throw new Error(`HTTP error ${response.status}: ${response.statusText}`);
+  }
+
+  // Prefer the name the server reports: a direct-download URL has none in its
+  // path, so deriving from the URL alone would lose it.
+  let filename =
+    filenameFromContentDisposition(response.headers.get("content-disposition")) ??
+    source.fileName ??
+    path.basename(new URL(source.url).pathname);
   if (!filename || !filename.toLowerCase().endsWith(".pdf")) {
     filename = "downloaded_document.pdf";
   }
   const dir = outputDir || os.tmpdir();
   const outputPath = path.join(dir, filename);
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`HTTP error ${response.status}: ${response.statusText}`);
-  }
   await fs.writeFile(outputPath, Buffer.from(await response.arrayBuffer()));
   return outputPath;
 }

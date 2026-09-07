@@ -8,7 +8,9 @@ Local memory for the Cloudflare Worker version of Mistral OCR MCP Server.
 **Created:** January 28, 2026
 **Status:** ✅ Complete and deployed via GitHub → Cloudflare Workers Builds
 **Worker Name:** `mcp-mistral-ocr`
-**Latest Commit:** `d7a60c4` - "fix: Add npm overrides to resolve MCP SDK version conflict"
+**Latest Commit:** `d7a60c4` - "fix: Add npm overrides to resolve MCP SDK version conflict" (this doc's metadata is from January 31, 2026 — `wrangler.toml` and `src/worker.ts` are still close to what's described below, but check `git log -- wrangler.toml src/worker.ts` before trusting exact details)
+
+**Note:** A separate Worker, the Telegram bot (`mistral-ocr-telegram`, config `wrangler.telegram.toml`), was added later as a fourth surface — see [CLAUDE.telegram.md](./CLAUDE.telegram.md). It shares no runtime with this Worker.
 
 ## Implementation Status
 

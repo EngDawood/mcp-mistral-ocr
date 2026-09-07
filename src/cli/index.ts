@@ -4,7 +4,8 @@ import { promises as fs } from "fs";
 import * as path from "path";
 import { config as loadEnv } from "dotenv";
 import { parseArgs, printHelp } from "./args.js";
-import { isAudioFile, isImageFile, isDocumentFile, expandPath, confirmOutputPath, parsePageSpec, markdownToText, Spinner } from "./utils.js";
+import { isAudioFile, isImageFile, isDocumentFile, expandPath, confirmOutputPath, parsePageSpec, markdownToText, probeRemoteName, Spinner } from "./utils.js";
+import { normalizeSourceUrl } from "../shared/source-url.js";
 import { processUrl, processPdf, processDocx, processImage } from "./ocr.js";
 import { transcribeAudio, findFiles } from "./audio.js";
 import {
@@ -106,13 +107,24 @@ async function main(): Promise<void> {
     const urlArgs = buildArgs(argv, config, "pdf");
     const outputExt = urlArgs.toTxt ? ".txt" : ".md";
 
+    // Share links (Drive, Docs, Dropbox, GitHub) address a viewer page, and the
+    // direct-download form they rewrite to has no filename in the path — so ask
+    // the server for the real name before falling back to the URL.
+    const source = normalizeSourceUrl(args.url);
+    let remoteName = source.fileName;
+    if (!remoteName && source.provider) remoteName = await probeRemoteName(source.url);
+
     let filename: string;
-    try {
-      const u = new URL(args.url);
-      const base = path.basename(decodeURIComponent(u.pathname));
-      filename = base ? base.replace(/\.[^.]+$/, "") + outputExt : `downloaded_document${outputExt}`;
-    } catch {
-      filename = `downloaded_document${outputExt}`;
+    if (remoteName) {
+      filename = remoteName.replace(/\.[^.]+$/, "") + outputExt;
+    } else {
+      try {
+        const u = new URL(source.url);
+        const base = path.basename(decodeURIComponent(u.pathname));
+        filename = base ? base.replace(/\.[^.]+$/, "") + outputExt : `downloaded_document${outputExt}`;
+      } catch {
+        filename = `downloaded_document${outputExt}`;
+      }
     }
 
     const saveDir = resolveUrlSaveDir(config);

@@ -4,6 +4,7 @@ import * as os from "os";
 import * as readline from "readline";
 import { AUDIO_EXTENSIONS, IMAGE_EXTENSIONS, DOCUMENT_EXTENSIONS } from "./args.js";
 import { parsePageSpec, markdownToText, cleanMarkdown } from "../shared/utils.js";
+import { filenameFromContentDisposition } from "../shared/source-url.js";
 
 export { parsePageSpec, markdownToText, cleanMarkdown };
 
@@ -17,6 +18,23 @@ export function isImageFile(filePath: string): boolean {
 
 export function isDocumentFile(filePath: string): boolean {
   return DOCUMENT_EXTENSIONS.has(path.extname(filePath).toLowerCase());
+}
+
+/**
+ * Ask the server what the file is called.
+ *
+ * Direct-download URLs — Drive's especially — carry no filename in the path,
+ * so without this the output would be named after a path segment like "view".
+ * One HEAD, and any failure just means we fall back to the URL.
+ */
+export async function probeRemoteName(url: string): Promise<string | undefined> {
+  try {
+    const res = await fetch(url, { method: "HEAD", redirect: "follow" });
+    if (!res.ok) return undefined;
+    return filenameFromContentDisposition(res.headers.get("content-disposition"));
+  } catch {
+    return undefined;
+  }
 }
 
 export function expandPath(p: string): string {

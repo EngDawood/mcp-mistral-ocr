@@ -8,6 +8,8 @@
 
 import { Mistral } from "@mistralai/mistralai";
 import { parsePageSpec, markdownToText, cleanMarkdown } from "../shared/utils.js";
+import { filenameFromContentDisposition } from "../shared/source-url.js";
+import type { SourceProvider } from "../shared/source-url.js";
 import { signPartUrl } from "./proxy.js";
 import { discardSplit, readSplitStatus, startSplit, SplitterError } from "./splitter.js";
 import type { Env, JobSettings, PendingJob } from "./types.js";
@@ -154,8 +156,12 @@ async function runOcr(
  * Catches the common "share link returns an HTML interstitial" case.
  */
 export async function validateUrl(
-  url: string
-): Promise<{ ok: true; contentType?: string; size?: number } | { ok: false; reason: string }> {
+  url: string,
+  provider?: SourceProvider
+): Promise<
+  | { ok: true; contentType?: string; size?: number; fileName?: string }
+  | { ok: false; reason: string }
+> {
   // Links are now fetched by our own Worker (Mistral's fetcher is blocked by some
   // origins), so refuse anything pointing inward before we mint a signed token for it.
   try {
@@ -178,24 +184,57 @@ export async function validateUrl(
   let res: Response;
   try {
     res = await fetch(url, { method: "HEAD", redirect: "follow" });
+    // Not every origin answers HEAD honestly — some reject it outright, others
+    // return a courtesy page. A one-byte ranged GET gets the real headers
+    // without pulling the document down.
+    if (!res.ok || /^text\/html/i.test(res.headers.get("content-type") ?? "")) {
+      const ranged = await fetch(url, {
+        method: "GET",
+        redirect: "follow",
+        headers: { Range: "bytes=0-0" },
+      });
+      // Read nothing: the headers are all we came for.
+      try {
+        await ranged.body?.cancel();
+      } catch {
+        /* already consumed or unsupported */
+      }
+      if (ranged.ok) res = ranged;
+    }
   } catch (e: any) {
     return { ok: false, reason: `could not reach the link (${e.message})` };
   }
   if (!res.ok) return { ok: false, reason: `the server answered ${res.status}` };
 
   const contentType = res.headers.get("content-type") ?? undefined;
-  const lengthHeader = res.headers.get("content-length");
+  // A ranged reply reports the slice length, so the real size lives in
+  // content-range ("bytes 0-0/142071") instead.
+  const total = res.headers.get("content-range")?.match(/\/(\d+)\s*$/)?.[1];
+  const lengthHeader = total ?? res.headers.get("content-length");
   const size = lengthHeader ? Number(lengthHeader) : undefined;
+  const fileName = filenameFromContentDisposition(res.headers.get("content-disposition"));
 
   if (contentType && /^text\/html/i.test(contentType)) {
+    // The link was already rewritten to its direct-download form before we got
+    // here, so HTML now means the file isn't reachable rather than a link the
+    // user needs to reshape — say that, instead of the old advice to convert it.
+    if (provider === "google-drive" || provider === "google-docs") {
+      return {
+        ok: false,
+        reason:
+          "Google returned a web page instead of the file. That usually means it " +
+          'isn\'t shared publicly — open it in Drive, set "Anyone with the link", ' +
+          "and send it again",
+      };
+    }
     return {
       ok: false,
       reason:
-        "that link returns a web page, not a file — share links from Drive and Dropbox " +
-        "need their direct-download form",
+        "that link returns a web page, not a file — check it points straight at " +
+        "the document",
     };
   }
-  return { ok: true, contentType, size };
+  return { ok: true, contentType, size, fileName };
 }
 
 export async function runJob(

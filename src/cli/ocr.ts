@@ -5,6 +5,7 @@ import mammoth from "mammoth";
 import TurndownService from "turndown";
 import { CliArgs, IMAGE_MIME } from "./args.js";
 import { resolveApiKey, markdownToText, cleanMarkdown } from "./utils.js";
+import { normalizeSourceUrl } from "../shared/source-url.js";
 
 /**
  * Calls client.ocr.process() with the given document URL and options.
@@ -266,8 +267,10 @@ export async function processUrl(
 ): Promise<{ outputPath: string; pageCount: number }> {
   const client = new Mistral({ apiKey: resolveApiKey(args.apiKey) });
   const needsImageBase64 = !args.toTxt && !args.keepImgs && !args.dropImgs;
+  // Drive/Docs/Dropbox/GitHub links point at a viewer page; Mistral needs the file.
+  const { url: sourceUrl } = normalizeSourceUrl(url);
   onStep?.("Running OCR...");
-  const response = await runOcr(client, url, args.model, args.extractHeader, args.extractFooter, needsImageBase64);
+  const response = await runOcr(client, sourceUrl, args.model, args.extractHeader, args.extractFooter, needsImageBase64);
 
   let pages = response.pages as Array<any>;
   if (!args.toTxt) {

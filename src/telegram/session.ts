@@ -11,6 +11,7 @@
 import { TelegramApi, buildPreview } from "./api.js";
 import { signFileUrl, signSourceUrl } from "./proxy.js";
 import { runJob, runSplitJob, validateUrl, explainError } from "./jobs.js";
+import { normalizeSourceUrl } from "../shared/source-url.js";
 import { containerNameFor } from "./splitter.js";
 import type { PartResult } from "./jobs.js";
 import { resolveSettings, applyToggle, buildPanel, describeSettings } from "./settings.js";
@@ -158,7 +159,13 @@ export class UserSession {
     const chatId = msg.chat.id;
     const status = await this.tg.sendMessage(chatId, "Checking link…");
 
-    const check = await validateUrl(url);
+    // Drive, Docs, Dropbox and GitHub links address a viewer page, not the file.
+    // Rewrite before validating, so the checks below and the bytes Mistral is
+    // eventually handed are all the same URL.
+    const source = normalizeSourceUrl(url);
+    const target = source.url;
+
+    const check = await validateUrl(target, source.provider);
     if (!check.ok) {
       return void this.tg.editMessageText(
         chatId,
@@ -167,12 +174,17 @@ export class UserSession {
       );
     }
 
-    let name = "document.pdf";
-    try {
-      const path = new URL(url).pathname;
-      const base = path.split("/").filter(Boolean).pop();
-      if (base && base.includes(".")) name = decodeURIComponent(base);
-    } catch { /* keep the default */ }
+    // A direct-download URL carries no filename in its path, so the header the
+    // server sent is the best source. The extension matters: it's what Mistral
+    // infers the document type from via the /f/ proxy tail.
+    let name = check.fileName ?? source.fileName ?? "document.pdf";
+    if (!check.fileName && !source.fileName) {
+      try {
+        const path = new URL(target).pathname;
+        const base = path.split("/").filter(Boolean).pop();
+        if (base && base.includes(".")) name = decodeURIComponent(base);
+      } catch { /* keep the default */ }
+    }
 
     const ext = extOf(name);
     const kind = IMAGE_EXTENSIONS.has(ext) ? "image" : AUDIO_EXTENSIONS.has(ext) ? "audio" : "url";
@@ -196,7 +208,7 @@ export class UserSession {
 
     const job = await this.createJob({
       kind: kind === "url" ? "url" : kind,
-      url,
+      url: target,
       fileName: name,
       fileSize: check.size,
       split,
@@ -587,6 +599,8 @@ export class UserSession {
       "Audio: MP3, WAV, FLAC, OGG, WEBM (up to 60 minutes)",
       "Links: anything publicly reachable. PDFs over 50 MB are split into parts",
       "  and processed automatically — you choose one merged file or one per part",
+      "Google Drive and Docs share links work directly — paste the link as-is.",
+      "  The file has to be shared as \"Anyone with the link\".",
       "",
       "After you send something I'll show the settings — tap to change them, then Send.",
       "",
