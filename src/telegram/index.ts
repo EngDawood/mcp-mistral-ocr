@@ -166,13 +166,12 @@ async function handleSetup(request: Request, env: Env, url: URL): Promise<Respon
         "50 MB are split into parts and processed automatically. " +
         "You'll get a settings panel to pick the output format, page range and image " +
         "handling before anything runs.\n\n" +
-        "Set your own Mistral API key with /key to get started."
+        "Access is granted by the owner — send /request to ask for it."
     );
     results.commands = await tg.setMyCommands([
       { command: "help", description: "What I can do and how" },
       { command: "settings", description: "Show your saved defaults" },
-      { command: "key", description: "Store your Mistral API key" },
-      { command: "forgetkey", description: "Delete your stored key" },
+      { command: "request", description: "Ask the owner for access" },
     ]);
   } catch (e: any) {
     return Response.json({ ok: false, error: String(e?.message ?? e), results }, { status: 500 });

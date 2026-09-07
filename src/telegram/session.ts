@@ -28,6 +28,9 @@ const DEFERRED_EXTENSIONS = new Set([".docx", ".doc"]);
 const MAX_AUDIO_SECONDS = 60 * 60;
 const JOB_TTL_MS = 24 * 60 * 60 * 1000;
 
+/** How often one user may ping the owner for access. Protects the owner's inbox. */
+const REQUEST_COOLDOWN_MS = 60 * 60 * 1000;
+
 /**
  * Mistral's document ceiling. Worth checking up front: when a file exceeds it,
  * the API reports "File could not be fetched from url", which sends you hunting
@@ -52,6 +55,16 @@ export class UserSession {
   }
 
   async fetch(request: Request): Promise<Response> {
+    // An admin-initiated write, arriving from the owner's own session object.
+    // DO stubs are not publicly addressable, so reaching here already implies an
+    // in-Worker caller that has passed its own admin check.
+    if (new URL(request.url).pathname === "/admin/key") {
+      const { key } = (await request.json()) as { key: string | null };
+      if (key) await this.ctx.storage.put("apiKey", key);
+      else await this.ctx.storage.delete("apiKey");
+      return new Response("ok");
+    }
+
     const { update, origin, userId } = (await request.json()) as {
       update: TgUpdate;
       origin: string;
@@ -95,24 +108,86 @@ export class UserSession {
       case "/help":
         return void this.tg.sendMessage(chatId, this.helpText(userId));
 
-      case "/key": {
-        // Delete the message carrying the key before doing anything else —
-        // otherwise a live credential sits in the chat log permanently.
+      // Keys are the owner's alone. A stranger who finds the bot cannot grant
+      // themselves access by pasting one, and no user is ever asked to leave a
+      // credential sitting in a chat log.
+      case "/setkey": {
+        // Scrub the message carrying the key before anything else — including
+        // when a non-admin sends it, since it is a live credential either way.
         await this.tg.deleteMessage(chatId, msg.message_id);
-        const key = rest.join("").trim();
-        if (!key) {
-          return void this.tg.sendMessage(chatId, "Usage: /key YOUR_MISTRAL_KEY");
+        if (!this.isAdmin(userId)) {
+          return void this.tg.sendMessage(chatId, "Unknown command. Try /help.");
         }
-        await this.ctx.storage.put("apiKey", key);
+        const [target, ...keyParts] = rest;
+        const key = keyParts.join("").trim();
+        if (!/^\d+$/.test(target ?? "") || !key) {
+          return void this.tg.sendMessage(chatId, "Usage: /setkey <user_id> <mistral_key>");
+        }
+        await this.setKeyFor(Number(target), key);
         return void this.tg.sendMessage(
           chatId,
-          "Key saved, and I deleted the message containing it. Use /forgetkey to remove it."
+          `Key set for ${target}. I deleted the message containing it.`
         );
       }
 
-      case "/forgetkey":
-        await this.ctx.storage.delete("apiKey");
-        return void this.tg.sendMessage(chatId, "Key deleted.");
+      case "/unsetkey": {
+        if (!this.isAdmin(userId)) {
+          return void this.tg.sendMessage(chatId, "Unknown command. Try /help.");
+        }
+        const revokeId = rest[0];
+        if (!/^\d+$/.test(revokeId ?? "")) {
+          return void this.tg.sendMessage(chatId, "Usage: /unsetkey <user_id>");
+        }
+        await this.setKeyFor(Number(revokeId), null);
+        return void this.tg.sendMessage(chatId, `Key removed for ${revokeId}.`);
+      }
+
+      // How a stranger reaches the owner. Without it the bot is a dead end for
+      // anyone who has not been set up, and the owner never learns they tried.
+      case "/request": {
+        if (this.isAdmin(userId)) {
+          return void this.tg.sendMessage(chatId, "You're the owner — you already have access.");
+        }
+        if (!this.env.ADMIN_ID) {
+          return void this.tg.sendMessage(chatId, "No owner is configured, so I can't pass this on.");
+        }
+        const last = (await this.ctx.storage.get<number>("lastRequestAt")) ?? 0;
+        if (Date.now() - last < REQUEST_COOLDOWN_MS) {
+          return void this.tg.sendMessage(
+            chatId,
+            "You've already asked and I passed it on — give the owner a little time."
+          );
+        }
+
+        const note = rest.join(" ").trim();
+        const who = msg.from?.username
+          ? `@${msg.from.username}`
+          : msg.from?.first_name ?? "unknown";
+        try {
+          await this.tg.sendMessage(
+            Number(this.env.ADMIN_ID),
+            `Access request from ${who} (id ${userId})` +
+              (note ? `\n\n"${note}"` : "") +
+              `\n\nGrant with:\n/setkey ${userId} <key>`
+          );
+        } catch (e) {
+          // Almost always means the owner has never opened a chat with the bot,
+          // so Telegram refuses to let it write to them first.
+          console.error("access request delivery failed", e);
+          return void this.tg.sendMessage(
+            chatId,
+            "I couldn't reach the owner just now. Try again later."
+          );
+        }
+        // Recorded only after delivery, so a failed send doesn't cost the user
+        // their hour.
+        await this.ctx.storage.put("lastRequestAt", Date.now());
+        return void this.tg.sendMessage(
+          chatId,
+          "Sent — the owner will get back to you.\n" +
+            "You can include a note next time: /request I need this for work invoices"
+        );
+      }
 
       case "/settings": {
         const defaults = resolveSettings(await this.ctx.storage.get<JobSettings>("defaults"));
@@ -383,8 +458,8 @@ export class UserSession {
           return void this.tg.editMessageText(
             chatId,
             cq.message!.message_id,
-            "You need your own Mistral API key first — send /key YOUR_KEY.\n" +
-              "Get one at https://console.mistral.ai/api-keys"
+            "You don't have access yet — send /request to ask the owner.\n" +
+              `Your user ID is ${userId}.`
           );
         }
         await this.ctx.storage.put(`run:${jobId}`, true);
@@ -575,10 +650,31 @@ export class UserSession {
    * the owner for every stranger who finds the bot.
    */
   private async resolveApiKey(userId: number): Promise<string | undefined> {
-    if (userId && String(userId) === String(this.env.ADMIN_ID)) {
+    if (this.isAdmin(userId)) {
       return this.env.MISTRAL_API_KEY;
     }
     return this.ctx.storage.get<string>("apiKey");
+  }
+
+  private isAdmin(userId: number): boolean {
+    return Boolean(this.env.ADMIN_ID) && String(userId) === String(this.env.ADMIN_ID);
+  }
+
+  /**
+   * Write (or clear) another user's stored key.
+   *
+   * A Durable Object can hold a stub for any other, so the owner's session
+   * reaches a user's directly and no public admin route has to exist. The target
+   * may never have messaged the bot — its object is created on first write.
+   */
+  private async setKeyFor(targetId: number, key: string | null): Promise<void> {
+    const ns = this.env.USER_SESSION;
+    const stub = ns.get(ns.idFromName(`user:${targetId}`));
+    await stub.fetch("https://session/admin/key", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ key }),
+    });
   }
 
   private async sweepStaleJobs() {
@@ -590,7 +686,7 @@ export class UserSession {
   }
 
   private helpText(userId: number): string {
-    const isAdmin = String(userId) === String(this.env.ADMIN_ID);
+    const isAdmin = this.isAdmin(userId);
     return [
       "Send me a document, image, audio file, or a direct link, and I'll return the text.",
       "",
@@ -606,10 +702,15 @@ export class UserSession {
       "",
       isAdmin
         ? "You're the owner, so you use the key configured on the Worker."
-        : "First set your Mistral key with /key YOUR_KEY (I delete the message straight after).",
+        : `Access is granted by the owner. Your user ID is ${userId}.`,
       "",
       "/settings — show your saved defaults",
-      "/forgetkey — delete your stored key",
+      ...(isAdmin
+        ? [
+            "/setkey <user_id> <key> — give a user access",
+            "/unsetkey <user_id> — revoke it",
+          ]
+        : ["/request — ask the owner for access"]),
       "",
       "Word documents aren't supported here — use the CLI, which preserves links and tables.",
     ].join("\n");

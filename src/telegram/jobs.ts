@@ -288,7 +288,7 @@ export function explainError(e: unknown): string {
     return "This file is over Mistral's 50 MB limit.";
   }
   if (/401|unauthor|invalid api key/i.test(msg)) {
-    return "Mistral rejected the API key. Set a new one with /key.";
+    return "Mistral rejected the API key. Ask the owner to update it.";
   }
   if (/429|rate limit/i.test(msg)) {
     return "Mistral is rate-limiting the account. Wait a moment and try again.";
