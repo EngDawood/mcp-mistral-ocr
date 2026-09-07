@@ -10,11 +10,21 @@
 
 import { TelegramApi, buildPreview } from "./api.js";
 import { signFileUrl, signSourceUrl } from "./proxy.js";
-import { runJob, runSplitJob, validateUrl, explainError } from "./jobs.js";
+import { runJob, runSplitJob, validateUrl, explainError, UserFacingError } from "./jobs.js";
 import { normalizeSourceUrl } from "../shared/source-url.js";
 import { containerNameFor } from "./splitter.js";
 import type { PartResult } from "./jobs.js";
 import { resolveSettings, applyToggle, buildPanel, describeSettings } from "./settings.js";
+import {
+  PER_JOB_CAP,
+  appendLedger,
+  audioCost,
+  canStart,
+  describeAccount,
+  describeLedger,
+  emptyAccount,
+} from "./credits.js";
+import type { Account, LedgerEntry } from "./credits.js";
 import type { Env, JobSettings, PendingJob, TgMessage, TgUpdate } from "./types.js";
 import { MAX_DOWNLOAD_BYTES } from "./api.js";
 
@@ -55,14 +65,11 @@ export class UserSession {
   }
 
   async fetch(request: Request): Promise<Response> {
-    // An admin-initiated write, arriving from the owner's own session object.
+    // An admin-initiated change, arriving from the owner's own session object.
     // DO stubs are not publicly addressable, so reaching here already implies an
     // in-Worker caller that has passed its own admin check.
-    if (new URL(request.url).pathname === "/admin/key") {
-      const { key } = (await request.json()) as { key: string | null };
-      if (key) await this.ctx.storage.put("apiKey", key);
-      else await this.ctx.storage.delete("apiKey");
-      return new Response("ok");
+    if (new URL(request.url).pathname === "/admin/op") {
+      return this.handleAdminOp(await request.json());
     }
 
     const { update, origin, userId } = (await request.json()) as {
@@ -85,6 +92,17 @@ export class UserSession {
     // Both are needed later by the alarm, which runs without an inbound update.
     await this.ctx.storage.put("origin", origin);
     await this.ctx.storage.put("userId", userId);
+
+    // The only user directory that exists. Durable Objects cannot be enumerated,
+    // so this is read back one at a time through the owner's /whois rather than
+    // listed — which is why it is recorded on every update rather than at signup.
+    const from = update.message?.from ?? update.callback_query?.from;
+    if (from) {
+      const account = await this.account();
+      account.username = from.username;
+      account.lastSeen = Date.now();
+      await this.putAccount(account);
+    }
 
     if (update.callback_query) return this.onCallback(update.callback_query, userId);
     const msg = update.message;
@@ -187,6 +205,27 @@ export class UserSession {
           "Sent — the owner will get back to you.\n" +
             "You can include a note next time: /request I need this for work invoices"
         );
+      }
+
+      case "/balance":
+        return void this.tg.sendMessage(chatId, describeAccount(await this.account()));
+
+      case "/usage": {
+        const ledger = (await this.ctx.storage.get<LedgerEntry[]>("ledger")) ?? [];
+        return void this.tg.sendMessage(chatId, describeLedger(ledger));
+      }
+
+      // Owner-only account management. All of these reach into another user's
+      // object, so they are gated here and nowhere else.
+      case "/grant":
+      case "/setcredit":
+      case "/trust":
+      case "/untrust":
+      case "/whois": {
+        if (!this.isAdmin(userId)) {
+          return void this.tg.sendMessage(chatId, "Unknown command. Try /help.");
+        }
+        return void this.adminCommand(chatId, cmd.split("@")[0], rest);
       }
 
       case "/settings": {
@@ -453,14 +492,9 @@ export class UserSession {
 
       case "run": {
         await this.tg.answerCallbackQuery(cq.id, "Started.");
-        const key = await this.resolveApiKey(userId);
-        if (!key) {
-          return void this.tg.editMessageText(
-            chatId,
-            cq.message!.message_id,
-            "You don't have access yet — send /request to ask the owner.\n" +
-              `Your user ID is ${userId}.`
-          );
+        const refusal = await this.refuseReason(userId);
+        if (refusal) {
+          return void this.tg.editMessageText(chatId, cq.message!.message_id, refusal);
         }
         await this.ctx.storage.put(`run:${jobId}`, true);
         await this.tg.editMessageText(chatId, cq.message!.message_id, `${job.fileName}\nQueued…`);
@@ -493,16 +527,26 @@ export class UserSession {
       if (panelId) await this.tg.editMessageText(job.chatId, panelId, `${job.fileName}\n${msg}`);
     };
 
+    const userId = Number(await this.ctx.storage.get<number>("userId")) || 0;
+
+    // Credits are added here as output reaches the user, never before, and the
+    // total is settled in the finally below. A job that dies half way through
+    // therefore bills for the parts that arrived and nothing for the rest.
+    const charged = { pages: 0 };
+
     try {
-      const userId = Number(await this.ctx.storage.get<number>("userId")) || 0;
+      // Balance may have run out while this sat in the queue.
+      const refusal = await this.refuseReason(userId);
+      if (refusal) throw new UserFacingError(refusal);
+
       const apiKey = await this.resolveApiKey(userId);
       if (!apiKey) throw new Error("401 no api key");
 
       const origin = (await this.ctx.storage.get<string>("origin"))!;
 
       const summary = job.split
-        ? await this.runSplit(job, apiKey, origin, userId, step)
-        : await this.runWhole(job, apiKey, origin, step);
+        ? await this.runSplit(job, apiKey, origin, userId, step, charged)
+        : await this.runWhole(job, apiKey, origin, step, charged);
 
       if (panelId) await this.tg.editMessageText(job.chatId, panelId, `${summary} ✅`);
     } catch (e) {
@@ -513,6 +557,9 @@ export class UserSession {
       } else {
         await this.tg.sendMessage(job.chatId, `❌ ${explained}`);
       }
+    } finally {
+      // The owner's own usage is not metered — they are paying Mistral directly.
+      if (!this.isAdmin(userId)) await this.charge(charged.pages, job.fileName);
     }
   }
 
@@ -521,7 +568,8 @@ export class UserSession {
     job: PendingJob,
     apiKey: string,
     origin: string,
-    step: (msg: string) => Promise<void>
+    step: (msg: string) => Promise<void>,
+    charged: { pages: number }
   ): Promise<string> {
     let sourceUrl: string;
     if (job.url) {
@@ -555,6 +603,13 @@ export class UserSession {
         : `${job.fileName} → ${result.pagesProcessed}/${result.pageCount} pages`;
 
     await this.tg.sendDocument(job.chatId, outputName(job), result.content, summary);
+
+    // Billed on the pages Mistral actually returned, which — now that the page
+    // range is sent to the API rather than applied to its answer — is exactly
+    // what the account was charged for.
+    charged.pages =
+      job.kind === "audio" ? audioCost(job.duration) : Math.max(1, result.pageCount);
+
     await this.sendFollowUps(job, result.content, result.warnings);
     return summary;
   }
@@ -572,12 +627,16 @@ export class UserSession {
     apiKey: string,
     origin: string,
     userId: number,
-    step: (msg: string) => Promise<void>
+    step: (msg: string) => Promise<void>,
+    charged: { pages: number }
   ): Promise<string> {
     const containerName = containerNameFor(userId);
     const separate = job.settings.parts === "separate";
     const base = baseName(job.fileName);
     const collected: PartResult[] = [];
+    // The one path where a page count is known before the next call is billed,
+    // so it is the one path where the per-job cap can actually be enforced.
+    const trusted = (await this.account()).trusted || this.isAdmin(userId);
 
     const outcome = await runSplitJob(
       job,
@@ -585,18 +644,31 @@ export class UserSession {
       { env: this.env, containerName, origin },
       step,
       async (part) => {
-        if (!separate) {
+        if (separate) {
+          // Send as we go, so output starts arriving while later parts still run.
+          const name = `${base}-part${String(part.part).padStart(2, "0")}.${job.settings.format}`;
+          await this.tg.sendDocument(
+            job.chatId,
+            name,
+            part.content,
+            `${job.fileName} · part ${part.part} · pages ${part.pageLabel}`
+          );
+          // Delivered, so bill it now — a later part failing must not un-charge
+          // a file the user already has.
+          charged.pages += part.pagesProcessed;
+
+          // Only enforceable here. Merge mode delivers nothing until the very
+          // end, so cutting it off at the cap would bill the owner for the
+          // parts already OCR'd and hand the user an error instead of a file.
+          if (!trusted && charged.pages >= PER_JOB_CAP) {
+            throw new UserFacingError(
+              `Stopped at the ${PER_JOB_CAP}-page limit for a single job. ` +
+                `The parts already sent are yours — send the rest as a new job.`
+            );
+          }
+        } else {
           collected.push(part);
-          return;
         }
-        // Send as we go, so output starts arriving while later parts still run.
-        const name = `${base}-part${String(part.part).padStart(2, "0")}.${job.settings.format}`;
-        await this.tg.sendDocument(
-          job.chatId,
-          name,
-          part.content,
-          `${job.fileName} · part ${part.part} · pages ${part.pageLabel}`
-        );
       }
     );
 
@@ -618,6 +690,8 @@ export class UserSession {
     await step("Merging…");
     const content = collected.map((part) => part.content).join("\n\n");
     await this.tg.sendDocument(job.chatId, outputName(job), content, summary);
+    // Merged output is all-or-nothing: nothing was delivered until this landed.
+    charged.pages = collected.reduce((n, part) => n + part.pagesProcessed, 0);
     await this.sendFollowUps(job, content, warnings);
     return summary;
   }
@@ -653,7 +727,159 @@ export class UserSession {
     if (this.isAdmin(userId)) {
       return this.env.MISTRAL_API_KEY;
     }
-    return this.ctx.storage.get<string>("apiKey");
+    // A key the owner pinned to this user, else the shared one. Note this no
+    // longer gates access on its own — refuseReason does that.
+    return (
+      (await this.ctx.storage.get<string>("apiKey")) ?? this.env.DEFAULT_MISTRAL_API_KEY
+    );
+  }
+
+  private async account(): Promise<Account> {
+    return (await this.ctx.storage.get<Account>("account")) ?? emptyAccount();
+  }
+
+  private async putAccount(account: Account): Promise<void> {
+    await this.ctx.storage.put("account", account);
+  }
+
+  /**
+   * Why this user may not run a job, or null if they may.
+   *
+   * This is the access gate. Before credits it was the absence of an API key;
+   * now that everyone falls back to a shared one, an empty balance is the only
+   * thing standing between a stranger and the owner's Mistral bill.
+   */
+  private async refuseReason(userId: number): Promise<string | null> {
+    if (this.isAdmin(userId)) return null;
+    const account = await this.account();
+    if (canStart(account)) return null;
+    return (
+      `You have ${account.balance} credits left, so I can't run this.\n\n` +
+      `Send /request to ask the owner for more — your user ID is ${userId}.`
+    );
+  }
+
+  /** Debit a completed job and record it for /usage. */
+  private async charge(cost: number, label: string): Promise<void> {
+    if (cost <= 0) return;
+    const account = await this.account();
+    account.balance -= cost;
+    account.lifetime += cost;
+    await this.putAccount(account);
+
+    const ledger = (await this.ctx.storage.get<LedgerEntry[]>("ledger")) ?? [];
+    await this.ctx.storage.put(
+      "ledger",
+      appendLedger(ledger, { at: Date.now(), cost, label })
+    );
+  }
+
+  // ------------------------------------------------------- owner commands
+
+  private async adminCommand(chatId: number, cmd: string, rest: string[]): Promise<void> {
+    const target = rest[0];
+    const needsAmount = cmd === "/grant" || cmd === "/setcredit";
+    if (!/^\d+$/.test(target ?? "")) {
+      return void this.tg.sendMessage(
+        chatId,
+        `Usage: ${cmd} <user_id>${needsAmount ? " <amount>" : ""}`
+      );
+    }
+    const targetId = Number(target);
+
+    if (cmd === "/whois") {
+      const res = await this.adminOp(targetId, { op: "whois" });
+      return void this.tg.sendMessage(chatId, res.text ?? "No record.");
+    }
+
+    if (cmd === "/trust" || cmd === "/untrust") {
+      await this.adminOp(targetId, { op: "trust", trusted: cmd === "/trust" });
+      return void this.tg.sendMessage(
+        chatId,
+        `${target} is now ${cmd === "/trust" ? "trusted — runs at zero balance" : "untrusted"}.`
+      );
+    }
+
+    const amount = Number(rest[1]);
+    if (!Number.isFinite(amount)) {
+      return void this.tg.sendMessage(chatId, `Usage: ${cmd} <user_id> <amount>`);
+    }
+    const res = await this.adminOp(targetId, {
+      op: cmd === "/grant" ? "grant" : "setcredit",
+      amount,
+    });
+    return void this.tg.sendMessage(chatId, res.text ?? "Done.");
+  }
+
+  /** Run an owner-initiated operation against another user's object. */
+  private async adminOp(
+    targetId: number,
+    body: Record<string, unknown>
+  ): Promise<{ text?: string }> {
+    const ns = this.env.USER_SESSION;
+    const stub = ns.get(ns.idFromName(`user:${targetId}`));
+    const res = await stub.fetch("https://session/admin/op", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ...body, targetId }),
+    });
+    return (await res.json()) as { text?: string };
+  }
+
+  /**
+   * Apply an owner-initiated change to THIS user's account.
+   *
+   * Reached only through a Durable Object stub, which is not publicly
+   * addressable — so arriving here already implies a caller that passed its own
+   * admin check in adminCommand.
+   */
+  private async handleAdminOp(body: any): Promise<Response> {
+    const account = await this.account();
+
+    switch (body.op) {
+      case "key":
+        if (body.key) await this.ctx.storage.put("apiKey", body.key);
+        else await this.ctx.storage.delete("apiKey");
+        return Response.json({ text: "ok" });
+
+      case "grant":
+        account.balance += body.amount;
+        await this.putAccount(account);
+        return Response.json({
+          text: `${body.targetId} now has ${account.balance} credits.`,
+        });
+
+      case "setcredit":
+        account.balance = body.amount;
+        await this.putAccount(account);
+        return Response.json({
+          text: `${body.targetId} set to ${account.balance} credits.`,
+        });
+
+      case "trust":
+        account.trusted = Boolean(body.trusted);
+        await this.putAccount(account);
+        return Response.json({ text: "ok" });
+
+      case "whois": {
+        const pinned = await this.ctx.storage.get<string>("apiKey");
+        const seen = account.lastSeen
+          ? new Date(account.lastSeen).toISOString().slice(0, 16).replace("T", " ")
+          : "never";
+        return Response.json({
+          text: [
+            `User ${body.targetId}${account.username ? ` (@${account.username})` : ""}`,
+            `Balance: ${account.balance}`,
+            `Used so far: ${account.lifetime}`,
+            `Trusted: ${account.trusted ? "yes" : "no"}`,
+            `Key: ${pinned ? "pinned by you" : "shared default"}`,
+            `Last seen: ${seen}`,
+          ].join("\n"),
+        });
+      }
+    }
+
+    return Response.json({ text: `unknown op ${body.op}` });
   }
 
   private isAdmin(userId: number): boolean {
@@ -670,10 +896,10 @@ export class UserSession {
   private async setKeyFor(targetId: number, key: string | null): Promise<void> {
     const ns = this.env.USER_SESSION;
     const stub = ns.get(ns.idFromName(`user:${targetId}`));
-    await stub.fetch("https://session/admin/key", {
+    await stub.fetch("https://session/admin/op", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ key }),
+      body: JSON.stringify({ op: "key", key }),
     });
   }
 
@@ -707,10 +933,19 @@ export class UserSession {
       "/settings — show your saved defaults",
       ...(isAdmin
         ? [
-            "/setkey <user_id> <key> — give a user access",
-            "/unsetkey <user_id> — revoke it",
+            "/whois <user_id> — balance, usage, key, last seen",
+            "/grant <user_id> <n> — add credits (negative takes them back)",
+            "/setcredit <user_id> <n> — set the balance outright",
+            "/trust <user_id> — let them run at zero balance",
+            "/untrust <user_id> — stop that",
+            "/setkey <user_id> <key> — pin them to one of your keys",
+            "/unsetkey <user_id> — back to the shared key",
           ]
-        : ["/request — ask the owner for access"]),
+        : [
+            "/balance — credits left",
+            "/usage — what your recent jobs cost",
+            "/request — ask the owner for more",
+          ]),
       "",
       "Word documents aren't supported here — use the CLI, which preserves links and tables.",
     ].join("\n");
