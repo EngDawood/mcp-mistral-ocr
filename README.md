@@ -63,6 +63,11 @@ ocr ./docs/
 # URL
 ocr --url https://example.com/paper.pdf
 
+# Share links work as-is — Drive, Docs/Sheets/Slides, Dropbox and GitHub blobs
+# are rewritten to their direct-download form automatically
+ocr --url "https://drive.google.com/file/d/FILE_ID/view?usp=sharing"
+ocr --url "https://docs.google.com/document/d/DOC_ID/edit"   # exported as PDF
+
 # Page selection
 ocr large.pdf --pages 1,5-10
 
@@ -73,6 +78,8 @@ ocr config show
 ```
 
 Outputs `.md` (default) or `.txt` (`--txt` flag). Skips files that already have an output.
+
+Share links must be publicly readable — a Drive file needs "Anyone with the link". Private files aren't supported; there's no Google sign-in.
 
 ## Local Development
 

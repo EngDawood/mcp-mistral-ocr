@@ -19,6 +19,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Mistral } from "@mistralai/mistralai";
 import { z } from "zod";
 import { parsePageSpec, markdownToText, cleanMarkdown, buildSchemaFromJson } from "./shared/utils.js";
+import { normalizeSourceUrl } from "./shared/source-url.js";
 
 // Constants
 const DEFAULT_MODEL = "mistral-ocr-latest";
@@ -284,8 +285,11 @@ server.registerTool(
       const input = ProcessUrlInputSchema.parse(params);
       const apiKey = getApiKey();
 
+      // Share links serve a viewer page rather than the file. Note that Mistral
+      // fetches the URL itself here (no filesystem, no proxy on this surface),
+      // so a rewritten link still depends on Google answering Mistral's fetcher.
       const result = await processPdfOcr(
-        input.url,
+        normalizeSourceUrl(input.url).url,
         "url",
         apiKey,
         input.output_format,

@@ -1,10 +1,12 @@
 # CLAUDE.telegram.md
 
-Design record for the **Telegram bot surface** of the Mistral OCR project.
+Design record and implementation reference for the **Telegram bot surface** of the Mistral OCR project.
 
-**Status:** 🟡 Design settled, **no code written**. Two experiments must run before implementation begins.
-**Date:** August 29, 2026
+**Status:** ✅ Implemented and merged to main (`feature/telegram-bot`, merged 2026-08-29 through 2026-08-31). Source: `src/telegram/` (2094 lines — `index.ts`, `session.ts`, `jobs.ts`, `splitter.ts`, `api.ts`, `proxy.ts`, `settings.ts`, `types.ts`). Worker config: `wrangler.telegram.toml` (name `mistral-ocr-telegram`). Container sidecar: `container/` (Python + `qpdf`).
+**Date:** Design drafted August 29, 2026; updated 2026-08-31 to reflect the shipped implementation, including one change to the original design — see "Update: the splitter container" below.
 **Companion docs:** [CLAUDE.md](./CLAUDE.md) · [CLAUDE.local.md](./CLAUDE.local.md) · [CLAUDE.worker.md](./CLAUDE.worker.md)
+
+This document originated as a pre-implementation design record (constraints, rejected approaches, settled decisions). That reasoning is kept below because it explains *why* the shipped code looks the way it does — but where the implementation diverged from the original plan, an **Update:** note says so. Don't trust a decision here over the source in `src/telegram/` if the two disagree and there's no note reconciling them.
 
 ---
 
@@ -64,15 +66,29 @@ holds them and there is nothing in memory to split. Splitting inside the Worker 
 memory cap — and anything that has escaped both is not a Worker, it is a VPS running a
 self-hosted `telegram-bot-api`. That is a coherent architecture; it is simply a different one.
 
-**Consequence:** size-based splitting is deleted from the design.
+**Consequence (original design):** size-based splitting is deleted from the design.
+
+**Update: the splitter container.** The implementation adds a third option this section didn't
+consider: a **Cloudflare Container sidecar**, not a VPS. `wrangler.telegram.toml` declares
+`[[containers]] class_name = "PdfSplitter"` (`container/Dockerfile`, Debian + `qpdf` + a stdlib-only
+Python HTTP server), and `src/telegram/splitter.ts` is the Worker-side client for it. This resolves
+size-based splitting **for the URL path only** — a Container has real memory and disk, so it can
+download a large file, split it with `qpdf`, and let the Worker stream the finished parts through
+`/f/<token>/...` to Mistral without ever buffering one in the 128 MB isolate. The 20 MB Telegram
+**upload** cap analyzed above is untouched and still real: a file attached directly in Telegram is
+still capped at 20 MB, because that limit is Telegram's, not the Worker's or the Container's. Only
+a *linked* document (a URL, which Mistral or the splitter fetches rather than Telegram delivering)
+can exceed 50 MB and trigger a split.
 
 ### The one reachable splitting case
 
 Mistral has *two* limits, and only one of them is unreachable. A dense text PDF of 1,200 pages can
-be 12 MB — under both size caps, over the **1,000-page** cap. That case needs no PDF parser:
-Mistral's OCR accepts a `pages` parameter (already used via `parsePageSpec` -> `ocrParams.pages`),
-so "splitting" is calling OCR twice on the same document URL with different page ranges and
-concatenating the markdown. **Unverified — see Experiment 2.**
+be 12 MB — under both size caps, over the **1,000-page** cap. In principle that case needs no PDF
+parser: Mistral's OCR accepts a `pages` parameter (already used via `parsePageSpec` -> `ocrParams.pages`),
+so "splitting" could mean calling OCR twice on the same document URL with different page ranges and
+concatenating the markdown. **Not what shipped** — see Experiment 2 (below) for why the `PdfSplitter`
+Container route was taken instead, and note the >1000-page case specifically was never tested either
+way.
 
 ### Why the existing downloader bot is not a pipeline stage
 
@@ -91,9 +107,9 @@ JS-rendered, geo-blocked), where 20 MB is accepted as the price of access.
 
 | # | Decision | Rationale |
 |---|---|---|
-| 1 | **Accept the 20 MB cap.** No VPS, no self-hosted Bot API server. | Keeps the Cloudflare Worker; makes Mistral's 50 MB limit unreachable, deleting split/merge entirely. |
+| 1 | **Accept the 20 MB Telegram-upload cap.** No VPS, no self-hosted Bot API server. | Keeps the Cloudflare Worker. *(Updated: Mistral's 50MB limit is reachable via linked URLs, not direct uploads — a `PdfSplitter` Container sidecar, not a VPS, was added later to split those. See "Update: the splitter container" above.)* |
 | 2 | **Inputs:** Telegram attachments <= 20 MB **plus** pasted URLs. | URLs are the escape hatch for larger files, and are nearly free — `src/worker.ts:149` already does it. |
-| 3 | **URL handling:** `HEAD` to validate content-type/size, then Mistral fetches. | Catches "Google Drive serves HTML" *before* spending a Mistral call. The Worker never downloads. |
+| 3 | **URL handling:** `HEAD` to validate content-type/size, then Mistral fetches. | Catches "Google Drive serves HTML" *before* spending a Mistral call. The Worker never downloads. *(Updated: rather than only catching it, `normalizeSourceUrl` in `src/shared/source-url.ts` now rewrites Drive/Docs/Dropbox/GitHub share links to their direct-download form first — HTML afterwards means the file isn't shared publicly, and the error says so. `validateUrl` falls back to a one-byte ranged `GET` when `HEAD` is refused or answers HTML, and reads the filename from `content-disposition` since a direct-download URL has none in its path.)* |
 | 4 | **Runtime:** Worker + **one Durable Object per Telegram user**. | `waitUntil` caps at 30 s — too short for a book. A DO alarm gives 15 min *and* per-user state *and* natural per-user job serialisation, in one binding. |
 | 5 | **Byte path:** signed proxy `/f/<hmac>` streaming from Telegram; Mistral fetches that. | The raw Telegram URL contains the **bot token** — handing it to Mistral grants full control of the bot and puts it in their logs. |
 | 6 | **Plan:** build for Paid, **degrade loudly** on Free. | Catch the CPU-limit error and reply "document too large for the current plan" rather than failing silently. |
@@ -123,24 +139,28 @@ no error, no prompt. The bot must hard-fail with "send /key first" for non-allow
 ## Architecture
 
 ```
-Telegram --webhook--> Worker  /tg/<secret>
+Telegram --webhook--> Worker  /tg/webhook
                         |  (verify X-Telegram-Bot-Api-Secret-Token, ack 200 immediately)
                         v
-                   DO: user:<telegram_id>
+                   DO: UserSession  user:<telegram_id>
                         |-- storage: api key, saved defaults, pending jobs
                         |-- alarm:   runs the OCR job (15 min wall time)
                         |-- serialises this user's jobs
                         |
                         |--> Telegram getFile ---------> file_path
-                        |--> Mistral ocr.process { document_url: <worker>/f/<hmac> }
+                        |--> [if linked URL over 50MB] PdfSplitter Container: qpdf split, poll /status
+                        |--> Mistral ocr.process { document_url: <worker>/f/<token>/... }
                         |                                        |
-                        |    Worker /f/<hmac> --streams----------+  (token never leaves)
+                        |    Worker /f/<token> --streams---------+  (Telegram token / Container bytes never leave)
                         |
                         +--> Telegram sendDocument + preview
 ```
 
-**New bindings required:** one Durable Object namespace (SQLite-backed). `wrangler.toml` currently
-declares no bindings at all, and has no `[limits]` block.
+**Bindings (as shipped, `wrangler.telegram.toml`):** two Durable Object namespaces (`USER_SESSION` →
+`UserSession`, SQLite-backed; `PDF_SPLITTER` → `PdfSplitter`, also the Container binding), one
+`[[containers]]` block (`image = "./container/Dockerfile"`, `instance_type = "basic"`), and a
+`[limits] cpu_ms = 300000` (Workers Paid only — Free's 10ms/invocation limit still applies
+regardless of this setting).
 
 **Environment / secrets:**
 
@@ -190,28 +210,35 @@ declares no bindings at all, and has no `[limits]` block.
 
 ## Out of scope for v1
 
-DOCX/DOC · structured extraction · size-based splitting · files > 20 MB via Telegram ·
+DOCX/DOC · structured extraction · files > 20 MB via direct Telegram upload ·
 directory/batch mode beyond media groups · transcoding of any kind.
+
+*(Size-based splitting was originally listed here too — it shipped, for linked URLs over 50MB,
+via the `PdfSplitter` Container. See "Update: the splitter container" above. It remains out of
+scope for direct Telegram uploads, which stay capped at 20MB regardless.)*
 
 ---
 
-## Open experiments — run before writing code
+## Experiments — resolved
 
 **1. Does `mammoth` run on Cloudflare Workers?**
-Decides whether decision #12 (DOCX deferred) is permanent or temporary. `mammoth` wants Node
-zlib/streams; `turndown` wants a DOM. Bundle both into a throwaway Worker and convert a real
-`.docx` under `wrangler dev`.
+Moot rather than answered: the shipped code kept DOCX/DOC deferred either way
+(`DEFERRED_EXTENSIONS` in `src/telegram/session.ts`), so decision #12 held without needing this
+experiment's result. If a future session wants Workers-side DOCX support, this question is still
+open and the experiment as originally described is still the right way to answer it.
 
 **2. Does Mistral reject a >1000-page document regardless of the `pages` parameter?**
-Decides whether page-range splitting is viable at all. Cheap decisive test: generate a
-1001-page PDF, call OCR with `pages: [0]`. Rejection means the limit is checked up front and
-page-splitting is impossible. Success means the `pages` parameter *is* the splitting mechanism,
-and the test bills a single page.
+Superseded by the Container approach: splitting is done by `qpdf` inside `PdfSplitter`
+(`container/server.py`), which slices the source PDF into byte-bounded parts (`SplitRequest.pages`
+narrows which pages are considered, `SplitPart` reports each part's actual page range), rather than
+by calling Mistral's OCR `pages` parameter twice on an oversized document. Whether Mistral itself
+would reject a >1000-page call was never tested, because the shipped design routes around the
+question entirely.
 
 ---
 
 ## Assumptions to overturn if wrong
 
 1. **Source bots hand over files, not URLs** — asked four times, never confirmed. If true, the
-   >20 MB URL escape hatch is theoretical and this is a **<= 20 MB tool** in practice.
-2. **`mammoth` will not run on Workers** — Experiment 1 settles it.
+   >20 MB URL escape hatch is theoretical and this is a **<= 20 MB tool** in practice for uploads
+   that originate from another bot (links pasted by a human are unaffected).
