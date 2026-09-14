@@ -8,6 +8,6 @@
     "lib": ["ES2022"],
     "noEmit": true
   },
-  "include": ["src/worker.ts"],
-  "exclude": ["node_modules", "dist", "src/index.ts"]
+  "include": ["src/worker.ts", "src/worker-combined.ts", "src/telegram/**/*", "src/shared/**/*"],
+  "exclude": ["node_modules", "dist", "src/index.ts", "src/cli", "src/mcp"]
 }

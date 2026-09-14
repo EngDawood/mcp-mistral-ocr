@@ -1,5 +1,11 @@
 name = "mistral-ocr-telegram"
-main = "src/telegram/index.ts"
+# Single Worker serving both the MCP OCR server (src/worker.ts) and the
+# Telegram bot (src/telegram/) — see src/worker-combined.ts for the routing.
+# Kept the mistral-ocr-telegram name/URL so the Telegram webhook (registered
+# via POST /setup) doesn't need to move; MCP clients should point at
+# https://mistral-ocr-telegram.<account>.workers.dev/mcp instead of the old
+# mcp-mistral-ocr Worker, which is retired.
+main = "src/worker-combined.ts"
 # Containers need a recent compatibility date; this was raised from 2025-01-28
 # when the PDF splitter was added.
 compatibility_date = "2025-10-01"
@@ -35,7 +41,7 @@ class_name = "UserSession"
 # Deploying without Docker: `wrangler deploy` only needs a local Docker daemon
 # because `image` below is a Dockerfile path. Workers Builds builds it in CI
 # instead, so connect this Worker to the repo and set its deploy command to
-#     npx wrangler deploy --config wrangler.telegram.toml
+#     npx wrangler deploy
 # It must run on the production branch: other branches default to
 # `wrangler versions upload`, which ships Worker code without publishing a new
 # image or rolling out containers. `wrangler dev` needs Docker too, so the
@@ -58,12 +64,15 @@ new_sqlite_classes = ["UserSession"]
 tag = "v2"
 new_sqlite_classes = ["PdfSplitter"]
 
-# Secrets (set with: npx wrangler secret put NAME --config wrangler.telegram.toml)
+# Secrets (set with: npx wrangler secret put NAME)
 #   TELEGRAM_TOKEN            bot token from @BotFather
 #   TELEGRAM_WEBHOOK_SECRET   random string; also gates POST /setup
 #   PROXY_SIGNING_KEY         random string; signs /f/<token> URLs
-#   MISTRAL_API_KEY           the owner's key (only the ADMIN_ID user gets it)
-#   ADMIN_ID                  your numeric Telegram user id
+#   MISTRAL_API_KEY           the owner's key (Telegram: only ADMIN_ID gets it;
+#                             MCP tools: primary key, shared with the bot)
+#   DEFAULT_MISTRAL_API_KEY   MCP only — fallback key for callers with no key
+#   MISTRAL_API_KEY_BACKUP    MCP only — used on a 429 from the primary key
+#   MCP_AUTH_KEY              MCP only — optional, protects the /mcp endpoint
 [vars]
 ADMIN_ID = "801062947"
 

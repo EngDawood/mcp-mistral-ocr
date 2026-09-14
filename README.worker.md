@@ -126,6 +126,7 @@ compatibility_flags = ["nodejs_compat"]
 |----------|----------|-------------|
 | `MISTRAL_API_KEY` | No* | User's Mistral AI API key (set via `wrangler secret put`) |
 | `DEFAULT_MISTRAL_API_KEY` | No* | Fallback API key for users without their own key |
+| `MISTRAL_API_KEY_BACKUP` | No | Second Mistral API key, used automatically if the primary key hits a 429 rate limit |
 | `MCP_AUTH_KEY` | No | Authentication key to protect the Worker endpoint |
 
 *At least one of `MISTRAL_API_KEY` or `DEFAULT_MISTRAL_API_KEY` must be set, or users must pass `?apiKey=` in the URL.
@@ -134,6 +135,8 @@ compatibility_flags = ["nodejs_compat"]
 1. `?apiKey=` query parameter (user-provided per request)
 2. `MISTRAL_API_KEY` secret (user's configured key)
 3. `DEFAULT_MISTRAL_API_KEY` secret (operator's fallback key)
+
+**Rate-limit fallback:** whichever key wins the priority above is tried first for every OCR call. If Mistral responds with a 429, the Worker retries the same call once with `MISTRAL_API_KEY_BACKUP` (if set and different from the primary key) before surfacing an error. This is separate from `DEFAULT_MISTRAL_API_KEY`, which only applies when no primary key is configured at all.
 
 ## Examples
 

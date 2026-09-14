@@ -19,9 +19,6 @@
     "dev": "tsc --watch",
     "worker:dev": "wrangler dev",
     "worker:deploy": "wrangler deploy",
-    "build:telegram": "tsc --project tsconfig.telegram.json",
-    "telegram:dev": "wrangler dev --config wrangler.telegram.toml",
-    "telegram:deploy": "wrangler deploy --config wrangler.telegram.toml",
     "test": "npm run build && node --test test/*.test.js"
   },
   "engines": {

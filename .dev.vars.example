@@ -2,3 +2,6 @@
 # Copy this file to .dev.vars and add your actual API key
 
 MISTRAL_API_KEY=your-mistral-api-key-here
+
+# Optional: second key, used automatically if MISTRAL_API_KEY hits a 429 rate limit
+# MISTRAL_API_KEY_BACKUP=your-backup-mistral-api-key-here

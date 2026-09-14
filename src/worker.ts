@@ -91,6 +91,33 @@ function getApiKey(): string {
   return apiKey;
 }
 
+// Secondary key, used only when the primary key hits Mistral's rate limit.
+function getBackupApiKey(): string | undefined {
+  return _env?.MISTRAL_API_KEY_BACKUP || undefined;
+}
+
+function isRateLimitError(error: any): boolean {
+  if (error?.statusCode === 429) return true;
+  return /\b429\b|rate.?limit/i.test(String(error?.message ?? error));
+}
+
+// Runs fn with the primary key; on a 429 from Mistral, retries once with
+// MISTRAL_API_KEY_BACKUP if one is configured and differs from the primary key.
+async function withRateLimitFallback<T>(
+  primaryKey: string,
+  fn: (apiKey: string) => Promise<T>
+): Promise<T> {
+  try {
+    return await fn(primaryKey);
+  } catch (error: any) {
+    const backupKey = getBackupApiKey();
+    if (backupKey && backupKey !== primaryKey && isRateLimitError(error)) {
+      return await fn(backupKey);
+    }
+    throw error;
+  }
+}
+
 async function processImageOcr(
   imageSource: string,
   sourceType: string,
@@ -288,17 +315,19 @@ server.registerTool(
       // Share links serve a viewer page rather than the file. Note that Mistral
       // fetches the URL itself here (no filesystem, no proxy on this surface),
       // so a rewritten link still depends on Google answering Mistral's fetcher.
-      const result = await processPdfOcr(
-        normalizeSourceUrl(input.url).url,
-        "url",
-        apiKey,
-        input.output_format,
-        input.pages,
-        input.extract_header,
-        input.extract_footer,
-        input.table_format,
-        input.include_images,
-        input.include_hyperlinks
+      const result = await withRateLimitFallback(apiKey, (key) =>
+        processPdfOcr(
+          normalizeSourceUrl(input.url).url,
+          "url",
+          key,
+          input.output_format,
+          input.pages,
+          input.extract_header,
+          input.extract_footer,
+          input.table_format,
+          input.include_images,
+          input.include_hyperlinks
+        )
       );
 
       if (input.clean_output && result.content) {
@@ -349,10 +378,8 @@ server.registerTool(
       const input = ProcessImageInputSchema.parse(params);
       const apiKey = getApiKey();
 
-      const [content, warnings] = await processImageOcr(
-        input.image_source,
-        input.source_type,
-        apiKey
+      const [content, warnings] = await withRateLimitFallback(apiKey, (key) =>
+        processImageOcr(input.image_source, input.source_type, key)
       );
 
       let finalContent = content;
@@ -411,7 +438,6 @@ server.registerTool(
     try {
       const input = ExtractStructuredInputSchema.parse(params);
       const apiKey = getApiKey();
-      const client = new Mistral({ apiKey });
 
       const schema = buildSchemaFromJson(input.json_schema);
 
@@ -445,7 +471,9 @@ server.registerTool(
         ocrParams.pages = Array.from(pageSet);
       }
 
-      const response = await client.ocr.process(ocrParams);
+      const response = await withRateLimitFallback(apiKey, (key) =>
+        new Mistral({ apiKey: key }).ocr.process(ocrParams)
+      );
 
       return {
         content: [
@@ -494,17 +522,19 @@ server.registerTool(
       const input = ExtractTablesInputSchema.parse(params);
       const apiKey = getApiKey();
 
-      const result = await processPdfOcr(
-        input.source,
-        input.source_type,
-        apiKey,
-        "markdown",
-        input.pages,
-        true,
-        true,
-        input.table_format,
-        false,
-        false
+      const result = await withRateLimitFallback(apiKey, (key) =>
+        processPdfOcr(
+          input.source,
+          input.source_type,
+          key,
+          "markdown",
+          input.pages,
+          true,
+          true,
+          input.table_format,
+          false,
+          false
+        )
       );
 
       return {
