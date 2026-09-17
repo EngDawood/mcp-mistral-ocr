@@ -20,6 +20,8 @@ import { Mistral } from "@mistralai/mistralai";
 import { z } from "zod";
 import { parsePageSpec, markdownToText, cleanMarkdown, buildSchemaFromJson } from "./shared/utils.js";
 import { normalizeSourceUrl } from "./shared/source-url.js";
+import { ocrProcess } from "./shared/ocr-api.js";
+import { applyRtlColumnOrder, type RtlMode } from "./shared/rtl-layout.js";
 
 // Constants
 const DEFAULT_MODEL = "mistral-ocr-latest";
@@ -47,6 +49,11 @@ const ProcessUrlInputSchema = z.object({
   table_format: z.enum(["markdown", "html"]).optional(),
   include_images: z.boolean().default(false),
   include_hyperlinks: z.boolean().default(false),
+  rtl_columns: z.enum(["auto", "on", "off"]).default("auto").describe(
+    "Reading order of multi-column pages. Mistral OCR always returns columns left-to-right, " +
+    "which reverses a two-column Arabic or Hebrew page. 'auto' repairs the order for pages " +
+    "detected as right-to-left, 'on' forces it, 'off' returns the OCR order unchanged."
+  ),
 });
 
 const ProcessImageInputSchema = z.object({
@@ -54,6 +61,11 @@ const ProcessImageInputSchema = z.object({
   source_type: z.enum(["url", "base64"]).default("url"), // Removed "file" option
   output_format: z.enum(["markdown", "text"]).default("text"),
   clean_output: z.boolean().default(false),
+  rtl_columns: z.enum(["auto", "on", "off"]).default("auto").describe(
+    "Reading order of multi-column pages. Mistral OCR always returns columns left-to-right, " +
+    "which reverses a two-column Arabic or Hebrew page. 'auto' repairs the order for pages " +
+    "detected as right-to-left, 'on' forces it, 'off' returns the OCR order unchanged."
+  ),
 });
 
 const ExtractStructuredInputSchema = z.object({
@@ -122,9 +134,9 @@ async function processImageOcr(
   imageSource: string,
   sourceType: string,
   apiKey: string,
-  model: string = DEFAULT_MODEL
+  model: string = DEFAULT_MODEL,
+  rtlColumns: RtlMode = "auto"
 ): Promise<[string, string[]]> {
-  const client = new Mistral({ apiKey });
   const warnings: string[] = [];
 
   let imageUrl: string;
@@ -140,17 +152,20 @@ async function processImageOcr(
     throw new Error(`Invalid source_type: ${sourceType}`);
   }
 
-  const response = await client.ocr.process({
+  const response = await ocrProcess(apiKey, {
     document: { type: "image_url", imageUrl },
     model,
+    // A scan of a two-column page needs the same reading-order repair a PDF does.
+    includeBlocks: rtlColumns !== "off",
   });
 
   if (!response.pages || !Array.isArray(response.pages)) {
     throw new Error("Unexpected OCR response format: no pages returned");
   }
 
-  const content = (response.pages as any[]).map((page: any) => page.markdown).join("\n\n");
-  return [content, warnings];
+  const rtl = applyRtlColumnOrder(response.pages, rtlColumns);
+  warnings.push(...rtl.warnings);
+  return [rtl.markdown.join("\n\n"), warnings];
 }
 
 async function processPdfOcr(
@@ -164,9 +179,9 @@ async function processPdfOcr(
   tableFormat?: "markdown" | "html",
   includeImages: boolean = false,
   includeHyperlinks: boolean = false,
-  model: string = DEFAULT_MODEL
+  model: string = DEFAULT_MODEL,
+  rtlColumns: RtlMode = "auto"
 ): Promise<any> {
-  const client = new Mistral({ apiKey });
   const warnings: string[] = [];
 
   // Build OCR document reference
@@ -188,7 +203,9 @@ async function processPdfOcr(
   const ocrParams: any = {
     document: documentRef,
     model,
-    includeBreakdown: true,
+    // Paragraph positions, so a right-to-left page can be put back in reading
+    // order (see ./shared/rtl-layout.ts).
+    includeBlocks: rtlColumns !== "off",
   };
 
   if (pages) {
@@ -201,13 +218,13 @@ async function processPdfOcr(
   try {
     (ocrParams as any).extractHeader = extractHeader;
     (ocrParams as any).extractFooter = extractFooter;
-    ocrResponse = await client.ocr.process(ocrParams);
+    ocrResponse = await ocrProcess(apiKey, ocrParams);
   } catch (error: any) {
-    if (error instanceof TypeError) {
+    if (error instanceof TypeError || String(error?.message).includes("extract_header")) {
       delete (ocrParams as any).extractHeader;
       delete (ocrParams as any).extractFooter;
       warnings.push("extract_header/extract_footer not supported, retrying without them");
-      ocrResponse = await client.ocr.process(ocrParams);
+      ocrResponse = await ocrProcess(apiKey, ocrParams);
     } else {
       throw error;
     }
@@ -217,8 +234,16 @@ async function processPdfOcr(
     throw new Error("Unexpected OCR response format: no pages returned");
   }
 
-  // Join all page markdown content
+  // Repair the column order before the pages are joined into one document.
   const allPages = ocrResponse.pages as any[];
+  const rtl = applyRtlColumnOrder(allPages, rtlColumns);
+  if (rtl.applied) {
+    allPages.forEach((page: any, i: number) => {
+      page.markdown = rtl.markdown[i];
+    });
+  }
+  warnings.push(...rtl.warnings);
+
   let content = allPages.map((page: any) => page.markdown).join("\n\n");
   const pageCount = allPages.length;
   const pagesProcessed = ocrParams.pages || Array.from({ length: pageCount }, (_: any, i: number) => i + 1);
@@ -326,7 +351,9 @@ server.registerTool(
           input.extract_footer,
           input.table_format,
           input.include_images,
-          input.include_hyperlinks
+          input.include_hyperlinks,
+          DEFAULT_MODEL,
+          input.rtl_columns
         )
       );
 
@@ -379,7 +406,7 @@ server.registerTool(
       const apiKey = getApiKey();
 
       const [content, warnings] = await withRateLimitFallback(apiKey, (key) =>
-        processImageOcr(input.image_source, input.source_type, key)
+        processImageOcr(input.image_source, input.source_type, key, DEFAULT_MODEL, input.rtl_columns)
       );
 
       let finalContent = content;

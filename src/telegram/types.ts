@@ -48,6 +48,13 @@ export type ImageMode = "drop" | "keep" | "embed";
  */
 export type PartsDelivery = "merge" | "separate";
 
+/**
+ * Reading order for multi-column pages. Mistral OCR always returns columns
+ * left-to-right, which reverses a two-column Arabic page — see
+ * ../shared/rtl-layout.ts.
+ */
+export type RtlColumns = "auto" | "on" | "off";
+
 export interface JobSettings {
   format: OutputFormat;
   images: ImageMode;
@@ -60,6 +67,8 @@ export interface JobSettings {
   pages?: string;
   /** One merged file, or one file per part. Only consulted for split jobs. */
   parts: PartsDelivery;
+  /** Column reading order: detected per page by default, or forced either way. */
+  rtl: RtlColumns;
 }
 
 /** What a job operates on, once the incoming message has been resolved. */
