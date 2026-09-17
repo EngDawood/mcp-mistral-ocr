@@ -9,7 +9,7 @@
  * in a chat, so the parser would have nothing to parse. The priority rule is what carries over.
  */
 
-import type { ImageMode, JobSettings, OutputFormat, PartsDelivery } from "./types.js";
+import type { ImageMode, JobSettings, OutputFormat, PartsDelivery, RtlColumns } from "./types.js";
 
 export const DEFAULT_SETTINGS: JobSettings = {
   // Markdown by default: the result always arrives as a file, where structure is worth keeping.
@@ -28,6 +28,9 @@ export const DEFAULT_SETTINGS: JobSettings = {
   // One file is what almost everyone wants; separate parts are for documents
   // big enough that a single output is unwieldy.
   parts: "merge",
+  // Detected per page from the text itself; the button is for the cases the
+  // letter count gets wrong.
+  rtl: "auto",
 };
 
 export function resolveSettings(saved?: Partial<JobSettings> | null): JobSettings {
@@ -37,6 +40,7 @@ export function resolveSettings(saved?: Partial<JobSettings> | null): JobSetting
 const FORMAT_CYCLE: OutputFormat[] = ["md", "txt"];
 const IMAGE_CYCLE: ImageMode[] = ["drop", "keep", "embed"];
 const PARTS_CYCLE: PartsDelivery[] = ["merge", "separate"];
+const RTL_CYCLE: RtlColumns[] = ["auto", "on", "off"];
 
 function next<T>(cycle: T[], current: T): T {
   const i = cycle.indexOf(current);
@@ -73,6 +77,9 @@ export function applyToggle(settings: JobSettings, key: string): JobSettings {
     case "parts":
       s.parts = next(PARTS_CYCLE, s.parts);
       break;
+    case "rtl":
+      s.rtl = next(RTL_CYCLE, s.rtl);
+      break;
   }
   return s;
 }
@@ -93,6 +100,12 @@ const PARTS_LABEL: Record<PartsDelivery, string> = {
   separate: "one per part",
 };
 
+const RTL_LABEL: Record<RtlColumns, string> = {
+  auto: "auto",
+  on: "right-to-left",
+  off: "as scanned",
+};
+
 /** One-line summary shown above the buttons. */
 export function describeSettings(
   settings: JobSettings,
@@ -111,6 +124,7 @@ export function describeSettings(
   if (isSplit) bits.push(`output ${PARTS_LABEL[settings.parts]}`);
   if (settings.preview) bits.push("preview on");
   if (settings.clean) bits.push("cleaned");
+  if (settings.rtl !== "auto") bits.push(`columns ${RTL_LABEL[settings.rtl]}`);
   if (!settings.header) bits.push("no header");
   if (!settings.footer) bits.push("no footer");
   return bits.join(" · ");
@@ -147,6 +161,9 @@ export function buildPanel(
     rows.push([
       { text: `⬆️ Header: ${settings.header ? "on" : "off"}`, callback_data: `t:header:${jobId}` },
       { text: `⬇️ Footer: ${settings.footer ? "on" : "off"}`, callback_data: `t:footer:${jobId}` },
+    ]);
+    rows.push([
+      { text: `↔️ Columns: ${RTL_LABEL[settings.rtl]}`, callback_data: `t:rtl:${jobId}` },
     ]);
   }
 

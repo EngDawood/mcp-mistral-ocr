@@ -6,33 +6,42 @@ import TurndownService from "turndown";
 import { CliArgs, IMAGE_MIME } from "./args.js";
 import { resolveApiKey, markdownToText, cleanMarkdown } from "./utils.js";
 import { normalizeSourceUrl } from "../shared/source-url.js";
+import { ocrProcess } from "../shared/ocr-api.js";
+import { applyRtlColumnOrder, type RtlMode } from "../shared/rtl-layout.js";
 
 /**
- * Calls client.ocr.process() with the given document URL and options.
+ * Runs OCR on the given document URL.
  * Retries once without header/footer flags if the API version doesn't support them.
  *
  * includeImageBase64 is requested only when we actually need the pixels:
  *   - OCR the image inline (default)
  * It is skipped for --imgs (refs kept as-is) and --drop-imgs (refs removed).
+ *
+ * Multi-column pages come back from Mistral in left-to-right order whatever the
+ * language, so page markdown is rebuilt in right-to-left reading order here
+ * when `rtlColumns` calls for it (--rtl / --ltr, default auto).
  */
 async function runOcr(
-  client: Mistral,
+  apiKey: string,
   documentUrl: string,
   model: string,
   extractHeader: boolean,
   extractFooter: boolean,
-  includeImageBase64: boolean
-): Promise<Awaited<ReturnType<typeof client.ocr.process>>> {
+  includeImageBase64: boolean,
+  rtlColumns: RtlMode
+): Promise<any> {
   const params: Record<string, unknown> = {
     document: { type: "document_url", documentUrl },
     model,
     includeImageBase64,
+    includeBlocks: rtlColumns !== "off",
   };
   if (!extractHeader) params["extractHeader"] = false;
   if (!extractFooter) params["extractFooter"] = false;
 
+  let response: any;
   try {
-    return await client.ocr.process(params as Parameters<typeof client.ocr.process>[0]);
+    response = await ocrProcess(apiKey, params);
   } catch (err) {
     const msg = String(err);
     if (msg.includes("extractHeader") || msg.includes("extractFooter")) {
@@ -41,10 +50,22 @@ async function runOcr(
       if (!extractHeader || !extractFooter) {
         process.stderr.write("  Note: Header/footer extraction control not supported by this API version\n");
       }
-      return await client.ocr.process(params as Parameters<typeof client.ocr.process>[0]);
+      response = await ocrProcess(apiKey, params);
+    } else {
+      throw err;
     }
-    throw err;
   }
+
+  const rtl = applyRtlColumnOrder(response.pages ?? [], rtlColumns);
+  if (rtl.applied) {
+    process.stderr.write("  Reordered columns for right-to-left reading\n");
+    (response.pages as any[]).forEach((page, i) => {
+      page.markdown = rtl.markdown[i];
+    });
+  }
+  for (const w of rtl.warnings) process.stderr.write(`  Warning: ${w}\n`);
+
+  return response;
 }
 
 /**
@@ -270,7 +291,7 @@ export async function processUrl(
   // Drive/Docs/Dropbox/GitHub links point at a viewer page; Mistral needs the file.
   const { url: sourceUrl } = normalizeSourceUrl(url);
   onStep?.("Running OCR...");
-  const response = await runOcr(client, sourceUrl, args.model, args.extractHeader, args.extractFooter, needsImageBase64);
+  const response = await runOcr(resolveApiKey(args.apiKey), sourceUrl, args.model, args.extractHeader, args.extractFooter, needsImageBase64, args.rtlColumns);
 
   let pages = response.pages as Array<any>;
   if (!args.toTxt) {
@@ -311,7 +332,7 @@ export async function processPdf(
   const signed = await client.files.getSignedUrl({ fileId: uploaded.id, expiry: 1 });
   const needsImageBase64 = !args.toTxt && !args.keepImgs && !args.dropImgs;
   onStep?.("Running OCR...");
-  const response = await runOcr(client, signed.url, args.model, args.extractHeader, args.extractFooter, needsImageBase64);
+  const response = await runOcr(resolveApiKey(args.apiKey), signed.url, args.model, args.extractHeader, args.extractFooter, needsImageBase64, args.rtlColumns);
 
   let pages = response.pages as Array<any>;
   if (!args.toTxt) {

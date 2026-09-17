@@ -1,3 +1,5 @@
+import type { RtlMode } from "../shared/rtl-layout.js";
+
 export const DEFAULT_OCR_MODEL = "mistral-ocr-latest";
 export const DEFAULT_AUDIO_MODEL = "voxtral-mini-latest";
 
@@ -37,6 +39,8 @@ export interface CliArgs {
   mdOnly: boolean;
   audioOnly: boolean;
   forceOcr: boolean;
+  /** Reading order of multi-column pages — see ../shared/rtl-layout.ts. */
+  rtlColumns: RtlMode;
   outputPath?: string;
 }
 
@@ -66,6 +70,10 @@ DOCUMENT / OCR OPTIONS:
   --drop-imgs           Drop images entirely: no image refs, no base64, no image OCR
                         (fastest and cheapest — text-only markdown)
   --model <n>           OCR model (default: ${DEFAULT_OCR_MODEL})
+  --rtl                 Force right-to-left column order (Arabic/Hebrew layouts)
+  --ltr                 Force left-to-right column order (the OCR's own order)
+                        Default: auto — pages detected as right-to-left are
+                        reordered, everything else is left as the OCR returned it
 
 MARKDOWN OPTIONS:
   mistral-ocr-cli file.md   Convert markdown to plain text (no API call needed)
@@ -126,6 +134,7 @@ export interface ParsedConfig {
   embedImgs?: boolean;
   dropImgs?: boolean;
   forceOcr?: boolean;
+  rtlColumns?: RtlMode;
   apiKey?: string;
 }
 
@@ -143,6 +152,7 @@ export function parseArgs(argv: string[], config: ParsedConfig = {}): CliArgs {
     mdOnly:        false,
     audioOnly:     false,
     forceOcr:      config.forceOcr      ?? false,
+    rtlColumns:    config.rtlColumns    ?? "auto",
     ...(config.apiKey && { apiKey: config.apiKey }),
   };
 
@@ -176,6 +186,8 @@ export function parseArgs(argv: string[], config: ParsedConfig = {}): CliArgs {
       case "--audio":         args.audioOnly = true; break;
       case "--force-ocr":     args.forceOcr = true; break;
       case "--no-force-ocr":  args.forceOcr = false; break;
+      case "--rtl":           args.rtlColumns = "on"; break;
+      case "--ltr":           args.rtlColumns = "off"; break;
       case "--no-header":     args.extractHeader = false; break;
       case "--no-footer":     args.extractFooter = false; break;
       case "--config":        i++; break; // already consumed before parseArgs
