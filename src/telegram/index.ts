@@ -162,7 +162,7 @@ async function handleSetup(request: Request, env: Env, url: URL): Promise<Respon
     results.description = await tg.setMyDescription(
       "I extract text from documents using Mistral OCR.\n\n" +
         "Send a PDF, PPTX, XLSX or image (up to 20 MB), an audio file to transcribe " +
-        "(up to 60 minutes), or a direct link to any of those. Linked PDFs over " +
+        "or video (up to 3 hours), or a direct link to any of those. Linked PDFs over " +
         "50 MB are split into parts and processed automatically. " +
         "You'll get a settings panel to pick the output format, page range and image " +
         "handling before anything runs.\n\n" +

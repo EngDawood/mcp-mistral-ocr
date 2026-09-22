@@ -21,11 +21,35 @@ import { MAX_DOWNLOAD_BYTES } from "./api.js";
 /** Formats Mistral OCR accepts. DOCX/DOC are deliberately absent — see below. */
 const DOC_EXTENSIONS = new Set([".pdf", ".pptx", ".xlsx", ".xls"]);
 const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".avif", ".tif", ".tiff"]);
-/** Mistral documents WAV, MP3, FLAC, OGG and WEBM — nothing else. */
-const AUDIO_EXTENSIONS = new Set([".mp3", ".wav", ".flac", ".ogg", ".oga", ".webm"]);
+/**
+ * What Mistral transcribes natively. It documents WAV, MP3, FLAC, OGG, M4A and
+ * WEBM; the rest are the same codecs under another name (MPEG/MPGA are MP3, OGA
+ * and OPUS are Ogg, MP4 is the M4A container), so a video's soundtrack works too.
+ * Anything else would need transcoding, which a Worker can't do.
+ */
+const AUDIO_EXTENSIONS = new Set([
+  ".mp3", ".mpeg", ".mpga", ".wav", ".flac", ".ogg", ".oga", ".opus", ".m4a", ".mp4", ".webm",
+]);
+/** Name for audio Telegram sent without one — Mistral infers the format from it. */
+const AUDIO_MIME_EXTENSIONS: Record<string, string> = {
+  "audio/mpeg": ".mp3",
+  "audio/mp3": ".mp3",
+  "audio/wav": ".wav",
+  "audio/x-wav": ".wav",
+  "audio/flac": ".flac",
+  "audio/x-flac": ".flac",
+  "audio/ogg": ".ogg",
+  "audio/opus": ".ogg",
+  "audio/mp4": ".m4a",
+  "audio/x-m4a": ".m4a",
+  "audio/webm": ".webm",
+  "video/mp4": ".mp4",
+  "video/webm": ".webm",
+};
 const DEFERRED_EXTENSIONS = new Set([".docx", ".doc"]);
 
-const MAX_AUDIO_SECONDS = 60 * 60;
+/** Voxtral Mini Transcribe V2 takes up to 3 hours in one request. */
+const MAX_AUDIO_SECONDS = 3 * 60 * 60;
 const JOB_TTL_MS = 24 * 60 * 60 * 1000;
 
 /** How often one user may ping the owner for access. Protects the owner's inbox. */
@@ -93,7 +117,7 @@ export class UserSession {
     const text = (msg.text ?? "").trim();
 
     if (text.startsWith("/")) return this.onCommand(msg, text, userId);
-    if (msg.document || msg.photo || msg.audio || msg.voice || msg.video) {
+    if (msg.document || msg.photo || msg.audio || msg.voice || msg.video || msg.video_note) {
       return this.onFile(msg);
     }
     if (text) return this.onText(msg, text);
@@ -267,8 +291,9 @@ export class UserSession {
     // Over Mistral's ceiling the document has to be cut into parts first, and only
     // a PDF can be cut. Decided here, from the link's content-length, so the panel
     // can offer the merge/separate choice before anything runs.
+    // Audio isn't bound by the document ceiling, and couldn't be split anyway.
     let split = false;
-    if (check.size != null && check.size > MAX_MISTRAL_BYTES) {
+    if (kind !== "audio" && check.size != null && check.size > MAX_MISTRAL_BYTES) {
       if (ext !== ".pdf") {
         return void this.tg.editMessageText(
           chatId,
@@ -305,15 +330,23 @@ export class UserSession {
 
     // Largest photo size, or whichever attachment type arrived.
     const photo = msg.photo?.[msg.photo.length - 1];
-    const src = msg.document ?? msg.audio ?? msg.voice ?? msg.video ?? photo;
+    const media = msg.audio ?? msg.voice ?? msg.video ?? msg.video_note;
+    const src = msg.document ?? media ?? photo;
     if (!src) return;
 
+    const mime = (src as { mime_type?: string }).mime_type?.toLowerCase();
     const fileName =
       (msg.document?.file_name ?? msg.audio?.file_name ?? msg.video?.file_name) ??
-      (msg.voice ? "voice.ogg" : photo ? "photo.jpg" : "file");
+      (msg.voice
+        ? "voice.ogg"
+        : msg.video_note
+          ? "video_note.mp4"
+          : photo
+            ? "photo.jpg"
+            : `${media ? "audio" : "file"}${(mime && AUDIO_MIME_EXTENSIONS[mime]) ?? ""}`);
     const ext = extOf(fileName);
     const size = (src as any).file_size as number | undefined;
-    const duration = (msg.audio ?? msg.voice ?? msg.video)?.duration;
+    const duration = media?.duration;
 
     // Everything below is decided from metadata Telegram already sent —
     // no download, no API call, so bad input fails instantly and for free.
@@ -337,21 +370,22 @@ export class UserSession {
       );
     }
 
-    const isAudio = Boolean(msg.audio || msg.voice) || AUDIO_EXTENSIONS.has(ext);
+    // A video is only ever useful here for its soundtrack.
+    const isAudio = Boolean(media) || AUDIO_EXTENSIONS.has(ext);
     const isImage = Boolean(photo) || IMAGE_EXTENSIONS.has(ext);
 
     if (isAudio) {
       if (ext && !AUDIO_EXTENSIONS.has(ext)) {
         return void this.tg.sendMessage(
           chatId,
-          `Mistral transcribes WAV, MP3, FLAC, OGG and WEBM — ${ext} isn't one of them, ` +
-            `and I can't convert audio here. Re-encode it and send it again.`
+          `Mistral transcribes MP3, WAV, FLAC, OGG, OPUS, M4A, MP4 and WEBM — ${ext} isn't ` +
+            `one of them, and I can't convert audio here. Re-encode it and send it again.`
         );
       }
       if (duration != null && duration > MAX_AUDIO_SECONDS) {
         return void this.tg.sendMessage(
           chatId,
-          `That's ${Math.round(duration / 60)} minutes. Mistral caps transcription at 60.`
+          `That's ${Math.round(duration / 60)} minutes. Mistral caps transcription at 3 hours.`
         );
       }
     } else if (!isImage && ext && !DOC_EXTENSIONS.has(ext)) {
@@ -692,7 +726,8 @@ export class UserSession {
       "",
       "Documents: PDF, PPTX, XLSX, XLS (up to 20 MB — Telegram's limit for bots)",
       "Images: JPG, PNG, AVIF, TIFF",
-      "Audio: MP3, WAV, FLAC, OGG, WEBM (up to 60 minutes)",
+      "Audio: MP3, WAV, FLAC, OGG, OPUS, M4A, WEBM, voice notes, and the sound of",
+      "  MP4 videos (up to 3 hours)",
       "Links: anything publicly reachable. PDFs over 50 MB are split into parts",
       "  and processed automatically — you choose one merged file or one per part",
       "Google Drive and Docs share links work directly — paste the link as-is.",

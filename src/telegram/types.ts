@@ -153,6 +153,13 @@ export interface TgVideo {
   file_size?: number;
 }
 
+export interface TgVideoNote {
+  file_id: string;
+  file_unique_id: string;
+  duration: number;
+  file_size?: number;
+}
+
 export interface TgMessage {
   message_id: number;
   from?: TgUser;
@@ -165,6 +172,7 @@ export interface TgMessage {
   audio?: TgAudio;
   voice?: TgVoice;
   video?: TgVideo;
+  video_note?: TgVideoNote;
 }
 
 export interface TgCallbackQuery {
