@@ -2,9 +2,9 @@
 
 Design record and implementation reference for the **Telegram bot surface** of the Mistral OCR project.
 
-**Status:** ✅ Implemented and merged to main (`feature/telegram-bot`, merged 2026-08-29 through 2026-08-31). Source: `src/telegram/` (2094 lines — `index.ts`, `session.ts`, `jobs.ts`, `splitter.ts`, `api.ts`, `proxy.ts`, `settings.ts`, `types.ts`). Worker config: `wrangler.telegram.toml` (name `mistral-ocr-telegram`). Container sidecar: `container/` (Python + `qpdf`).
+**Status:** ✅ Implemented and merged to main (`feature/telegram-bot`, merged 2026-08-29 through 2026-08-31; merged into the single combined Worker deployment on 2026-09-13, see [CLAUDE.md](./CLAUDE.md)). Source: `src/telegram/` (2094 lines at last count — `index.ts`, `session.ts`, `jobs.ts`, `splitter.ts`, `api.ts`, `proxy.ts`, `settings.ts`, `types.ts`). Worker config: `wrangler.toml` (name `mistral-ocr-telegram`, entry point `src/worker-combined.ts` — `wrangler.telegram.toml` was folded into it and no longer exists). Container sidecar: `container/` (Python + `qpdf`).
 **Date:** Design drafted August 29, 2026; updated 2026-08-31 to reflect the shipped implementation, including one change to the original design — see "Update: the splitter container" below.
-**Companion docs:** [CLAUDE.md](./CLAUDE.md) · [CLAUDE.local.md](./CLAUDE.local.md) · [CLAUDE.worker.md](./CLAUDE.worker.md)
+**Companion docs:** [CLAUDE.md](./CLAUDE.md) · [CLAUDE.local.md](./CLAUDE.local.md)
 
 This document originated as a pre-implementation design record (constraints, rejected approaches, settled decisions). That reasoning is kept below because it explains *why* the shipped code looks the way it does — but where the implementation diverged from the original plan, an **Update:** note says so. Don't trust a decision here over the source in `src/telegram/` if the two disagree and there's no note reconciling them.
 
@@ -69,7 +69,7 @@ self-hosted `telegram-bot-api`. That is a coherent architecture; it is simply a 
 **Consequence (original design):** size-based splitting is deleted from the design.
 
 **Update: the splitter container.** The implementation adds a third option this section didn't
-consider: a **Cloudflare Container sidecar**, not a VPS. `wrangler.telegram.toml` declares
+consider: a **Cloudflare Container sidecar**, not a VPS. `wrangler.toml` declares
 `[[containers]] class_name = "PdfSplitter"` (`container/Dockerfile`, Debian + `qpdf` + a stdlib-only
 Python HTTP server), and `src/telegram/splitter.ts` is the Worker-side client for it. This resolves
 size-based splitting **for the URL path only** — a Container has real memory and disk, so it can
@@ -156,7 +156,7 @@ Telegram --webhook--> Worker  /tg/webhook
                         +--> Telegram sendDocument + preview
 ```
 
-**Bindings (as shipped, `wrangler.telegram.toml`):** two Durable Object namespaces (`USER_SESSION` →
+**Bindings (as shipped, `wrangler.toml`):** two Durable Object namespaces (`USER_SESSION` →
 `UserSession`, SQLite-backed; `PDF_SPLITTER` → `PdfSplitter`, also the Container binding), one
 `[[containers]]` block (`image = "./container/Dockerfile"`, `instance_type = "basic"`), and a
 `[limits] cpu_ms = 300000` (Workers Paid only — Free's 10ms/invocation limit still applies
@@ -169,10 +169,10 @@ regardless of this setting).
 | `MISTRAL_API_KEY` | present in `.dev.vars` |
 | `TELEGRAM_TOKEN` | present in `.dev.vars` |
 | `ADMIN_ID` | present in `.dev.vars` — the allowlist |
-| `TELEGRAM_WEBHOOK_SECRET` | **still needed** |
-| `PROXY_SIGNING_KEY` | **still needed** (HMAC for `/f/<hmac>`) |
+| `TELEGRAM_WEBHOOK_SECRET` | required in production (`wrangler secret put`) — gates `/tg/webhook` and `POST /setup` |
+| `PROXY_SIGNING_KEY` | required in production (`wrangler secret put`) — HMAC for `/f/<hmac>` |
 
-`.dev.vars` is local-development only. Each of these needs `wrangler secret put` for production.
+`.dev.vars` is local-development only; production secrets are set via `wrangler secret put` (see [CLAUDE.md](./CLAUDE.md) for the full secret list, which also covers the MCP-only secrets this bot doesn't use).
 
 ---
 
@@ -184,6 +184,9 @@ regardless of this setting).
    `mime_type`, audio `duration` > 60 min. All free; no download required.
 4. **URL input:** `HEAD` the link -> confirm it returns a document, not an HTML interstitial.
 5. **Show the confirm panel** — current defaults as buttons, page-range choice, Send.
+   The "↔️ Columns" button sets the reading order of multi-column pages
+   (auto / right-to-left / as scanned) — see "Right-to-Left Column Order" in
+   [CLAUDE.md](./CLAUDE.md) for why a two-column Arabic page needs it.
 6. **On Send:** the DO sets an alarm; the job runs there.
 7. **Progress:** `editMessageText` driven by the existing `onStep` callbacks
    (`processPdf`, `processUrl`, `transcribeAudio` all already take one).

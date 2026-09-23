@@ -52,4 +52,7 @@ CLAUDE.local.md
 # Wrangler / Cloudflare Workers
 .wrangler/
 wrangler.toml.bak
-reports/refactor/refactor_index_30-03-2026_174250.md
+reports/refactor/
+
+# Local test documents
+temp/*

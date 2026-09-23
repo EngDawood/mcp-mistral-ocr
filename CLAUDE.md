@@ -78,15 +78,24 @@ One Worker, one deploy, one set of secrets — routed by path in `src/worker-com
 - **Build Tool:** Cloudflare Workers Builds; `wrangler deploy` needs a local Docker daemon (or CI) to build the container image — this now applies to every deploy, including MCP-only changes, since both surfaces ship together
 - **Limitations:** No filesystem (MCP: use URLs or base64 instead; Telegram: DOCX/DOC deferred to the CLI); Telegram's 20MB upload cap (URLs bypass it, auto-split above 50MB)
 
+**Worker runtime limits:** CPU 10ms (Free) / 30s–5min via `[limits] cpu_ms` (Paid, set to 300000 here) · Memory 128MB per isolate · Free 50 subrequests, Paid 10,000. See [CLAUDE.telegram.md](./CLAUDE.telegram.md) for the full verified constraint table (Telegram + Mistral + Workers limits together).
+
+**MCP Worker troubleshooting:**
+| Symptom | Cause | Fix |
+|---|---|---|
+| `MISTRAL_API_KEY not found` | Secret not set | `npx wrangler secret put MISTRAL_API_KEY` |
+| Worker timeout on large PDFs | CPU time exceeded | Use `pages` param, or raise `[limits] cpu_ms` (Paid only) |
+| `wrangler dev` / deploy fails on containers | Docker daemon not running locally | Start Docker, or deploy via Workers Builds CI instead |
+
 ## Implemented Tools
 
 ### Local Version (6 tools)
 
 | Tool Name | Description | Key Parameters |
 |-----------|-------------|----------------|
-| `mistral_ocr_process_pdf` | Process local document file (PDF, DOCX, DOC, PPTX, XLSX, XLS) | `file_path`, `output_format`, `pages`, `clean_output`, `table_format`, `include_images`, `include_hyperlinks` |
-| `mistral_ocr_process_url` | Download and process document from URL | `url`, `output_format`, `pages`, `keep_pdf`, `table_format`, `include_images`, `include_hyperlinks` |
-| `mistral_ocr_process_image` | Process image file directly | `image_source`, `source_type`, `output_format`, `clean_output` |
+| `mistral_ocr_process_pdf` | Process local document file (PDF, DOCX, DOC, PPTX, XLSX, XLS) | `file_path`, `output_format`, `pages`, `clean_output`, `table_format`, `include_images`, `include_hyperlinks`, `rtl_columns` |
+| `mistral_ocr_process_url` | Download and process document from URL | `url`, `output_format`, `pages`, `keep_pdf`, `table_format`, `include_images`, `include_hyperlinks`, `rtl_columns` |
+| `mistral_ocr_process_image` | Process image file directly | `image_source`, `source_type`, `output_format`, `clean_output`, `rtl_columns` |
 | `mistral_ocr_extract_structured` | Extract structured data with JSON schema | `file_path`, `json_schema`, `pages`, `annotation_type` |
 | `mistral_ocr_extract_tables` | Extract tables in HTML/markdown format | `file_path`, `table_format`, `pages` |
 | `mistral_ocr_clean_markdown` | Clean repetitive content from markdown | `content`, `config_path` |
@@ -95,8 +104,8 @@ One Worker, one deploy, one set of secrets — routed by path in `src/worker-com
 
 | Tool Name | Description | Key Parameters | Notes |
 |-----------|-------------|----------------|-------|
-| `mistral_ocr_process_url` | Process PDF from URL | `url`, `output_format`, `pages`, `clean_output`, `table_format`, `include_images`, `include_hyperlinks` | No `keep_pdf` (no filesystem) |
-| `mistral_ocr_process_image` | Process image (URL or base64) | `image_source`, `source_type`, `output_format`, `clean_output` | `source_type`: "url" or "base64" only |
+| `mistral_ocr_process_url` | Process PDF from URL | `url`, `output_format`, `pages`, `clean_output`, `table_format`, `include_images`, `include_hyperlinks`, `rtl_columns` | No `keep_pdf` (no filesystem) |
+| `mistral_ocr_process_image` | Process image (URL or base64) | `image_source`, `source_type`, `output_format`, `clean_output`, `rtl_columns` | `source_type`: "url" or "base64" only |
 | `mistral_ocr_extract_structured` | Extract structured data | `source`, `source_type`, `json_schema`, `pages`, `annotation_type` | Uses `source`/`source_type` instead of `file_path` |
 | `mistral_ocr_extract_tables` | Extract tables | `source`, `source_type`, `table_format`, `pages` | Uses `source`/`source_type` instead of `file_path` |
 | `mistral_ocr_clean_markdown` | Clean repetitive markdown | `content` | Stateless, works identically |
@@ -146,11 +155,59 @@ mistral-mcp-js/
 │   │   └── types.ts             # Env + Telegram update types
 │   └── shared/
 │       ├── utils.ts            # Shared utilities (parsePageSpec, markdownToText, cleanMarkdown, buildSchemaFromJson)
-│       └── source-url.ts       # Share-link normalisation (Drive/Docs/Dropbox/GitHub → direct download)
+│       ├── source-url.ts       # Share-link normalisation (Drive/Docs/Dropbox/GitHub → direct download)
+│       ├── ocr-api.ts          # Direct POST /v1/ocr client — the SDK drops `include_blocks`
+│       └── rtl-layout.ts       # Right-to-left column reordering from paragraph bounding boxes
 ├── test/                       # node --test suite (`npm test`)
 ├── dist/                       # Compiled JS output (git ignored)
 └── node_modules/               # Dependencies
 ```
+
+## Right-to-Left Column Order
+
+Mistral OCR emits a page's text blocks left-to-right whatever the language, so a
+two-column Arabic (or Hebrew) page comes back with the **left** column first —
+the second half of the page read before the first. No request parameter changes
+this (confirmed against the API and the Mistral dashboard), so the order is
+repaired locally in `src/shared/rtl-layout.ts`:
+
+1. `include_blocks: true` returns a bounding box per paragraph.
+2. Header blocks stay at the top, footers at the bottom. In between, a block
+   spanning both columns (a title, a centred DOI) divides the page into bands.
+3. Within each band the right column is read before the left, each top to bottom.
+4. A paragraph-length block whose text is already inside a longer block is
+   dropped — Mistral sometimes repeats the tail of a merged column. Short blocks
+   are exempt: a heading legitimately repeats text from the body, and filtering
+   those deletes real titles.
+
+**Direction detection** counts right-to-left letters against Latin ones,
+excluding digits and punctuation (`(٣.٦٦)` is not evidence of Arabic prose, and
+Arabic-Indic digits share the Arabic Unicode block). The count runs over the
+**whole document**, not one page: the first page of an Arabic article carries an
+English abstract beside the Arabic one and can come out majority-Latin on its
+own. A page that is lopsided either way then decides for itself, so a wholly
+English page inside an Arabic document keeps its natural order.
+
+**Per-surface control** (default `auto` everywhere):
+
+| Surface | Control |
+|---------|---------|
+| MCP tools | `rtl_columns: "auto" \| "on" \| "off"` on `process_pdf`, `process_url`, `process_image` |
+| CLI | `--rtl` forces it, `--ltr` disables it; `ocr config set rtlColumns on` persists a default |
+| Worker MCP | `rtl_columns` on `mistral_ocr_process_url` and `mistral_ocr_process_image` |
+| Telegram bot | "↔️ Columns" button on the confirm panel, cycling auto → right-to-left → as scanned |
+
+**Why `src/shared/ocr-api.ts` exists:** `@mistralai/mistralai` 1.13 validates the
+request against a zod schema written before `include_blocks` and silently drops
+unknown fields, so asking the SDK for bounding boxes returns a response with no
+blocks and no error. The text-extraction calls therefore POST to `/v1/ocr`
+directly and the response is converted back to the SDK's camelCase shape, so
+callers are unchanged. Annotation calls (`extract_structured`) still go through
+the SDK — those request bodies carry user-defined schema field names that must
+not be renamed. Upgrading to SDK 2.x would remove the need for this module.
+
+**Not covered:** three-column layouts (the middle column is grouped with a
+neighbour) and pages whose tables or images sit mid-column.
 
 ## Share Links
 
