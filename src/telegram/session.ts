@@ -546,7 +546,10 @@ export class UserSession {
       );
     }
 
-    const result = await runJob(job, apiKey, sourceUrl, step);
+    const result = await runJob(job, apiKey, sourceUrl, step, {
+      ocrModel: this.env.OCR_MODEL,
+      audioModel: this.env.AUDIO_MODEL,
+    });
 
     await step("Sending…");
     const summary =

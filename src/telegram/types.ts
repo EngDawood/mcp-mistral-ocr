@@ -20,6 +20,8 @@ export interface Env {
 
   // Config
   ADMIN_ID?: string;
+  OCR_MODEL?: string;
+  AUDIO_MODEL?: string;
 
   // Bindings
   USER_SESSION: DurableObjectNamespace;

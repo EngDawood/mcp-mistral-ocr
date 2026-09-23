@@ -14,8 +14,8 @@ import { signPartUrl } from "./proxy.js";
 import { discardSplit, readSplitStatus, startSplit, SplitterError } from "./splitter.js";
 import type { Env, JobSettings, PendingJob } from "./types.js";
 
-const OCR_MODEL = "mistral-ocr-latest";
-const AUDIO_MODEL = "voxtral-mini-latest";
+const DEFAULT_OCR_MODEL = "mistral-ocr-latest";
+const DEFAULT_AUDIO_MODEL = "voxtral-mini-latest";
 
 /**
  * Above this, `cleanMarkdown` (which counts every line occurrence across the
@@ -125,11 +125,12 @@ function buildContent(pages: any[], settings: JobSettings): JobResult {
 async function runOcr(
   client: Mistral,
   document: Record<string, unknown>,
-  settings: JobSettings
+  settings: JobSettings,
+  model: string = DEFAULT_OCR_MODEL
 ): Promise<any[]> {
   const params: Record<string, unknown> = {
     document,
-    model: OCR_MODEL,
+    model,
     includeImageBase64: settings.images === "embed",
   };
   if (!settings.header) params.extractHeader = false;
@@ -241,14 +242,17 @@ export async function runJob(
   job: PendingJob,
   apiKey: string,
   sourceUrl: string,
-  onStep: StepFn
+  onStep: StepFn,
+  models?: { ocrModel?: string; audioModel?: string }
 ): Promise<JobResult> {
   const client = new Mistral({ apiKey });
+  const audioModel = models?.audioModel || DEFAULT_AUDIO_MODEL;
+  const ocrModel = models?.ocrModel || DEFAULT_OCR_MODEL;
 
   if (job.kind === "audio") {
     await onStep("Transcribing…");
     const res = await client.audio.transcriptions.complete({
-      model: AUDIO_MODEL,
+      model: audioModel,
       fileUrl: sourceUrl,
     } as any);
     return {
@@ -265,7 +269,7 @@ export async function runJob(
       ? { type: "image_url", imageUrl: sourceUrl }
       : { type: "document_url", documentUrl: sourceUrl };
 
-  const pages = await runOcr(client, document, job.settings);
+  const pages = await runOcr(client, document, job.settings, ocrModel);
 
   await onStep("Building output…");
   return buildContent(pages, job.settings);
@@ -400,10 +404,12 @@ export async function runSplitJob(
         `part-${part.index}.pdf`
       );
 
+      const splitOcrModel = env.OCR_MODEL || DEFAULT_OCR_MODEL;
       const pages = await runOcr(
         client,
         { type: "document_url", documentUrl: partUrl },
-        partSettings
+        partSettings,
+        splitOcrModel
       );
 
       const built = buildContent(pages, partSettings);

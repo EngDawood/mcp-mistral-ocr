@@ -22,13 +22,17 @@ import { parsePageSpec, markdownToText, cleanMarkdown, buildSchemaFromJson } fro
 import { normalizeSourceUrl } from "./shared/source-url.js";
 
 // Constants
-const DEFAULT_MODEL = "mistral-ocr-latest";
+const DEFAULT_OCR_MODEL = "mistral-ocr-latest";
 
 // Module-level env reference, set on each request in the fetch handler.
 // Safe because Cloudflare Workers are single-threaded per isolate.
 let _env: any;
 // User-provided API key from query parameter (overrides env secret)
 let _userApiKey: string | null = null;
+
+function getOcrModel(): string {
+  return _env?.OCR_MODEL || DEFAULT_OCR_MODEL;
+}
 
 // =============================================================================
 // Zod Input Schemas (Worker-compatible versions)
@@ -122,7 +126,7 @@ async function processImageOcr(
   imageSource: string,
   sourceType: string,
   apiKey: string,
-  model: string = DEFAULT_MODEL
+  model?: string
 ): Promise<[string, string[]]> {
   const client = new Mistral({ apiKey });
   const warnings: string[] = [];
@@ -142,7 +146,7 @@ async function processImageOcr(
 
   const response = await client.ocr.process({
     document: { type: "image_url", imageUrl },
-    model,
+    model: model || getOcrModel(),
   });
 
   if (!response.pages || !Array.isArray(response.pages)) {
@@ -164,7 +168,7 @@ async function processPdfOcr(
   tableFormat?: "markdown" | "html",
   includeImages: boolean = false,
   includeHyperlinks: boolean = false,
-  model: string = DEFAULT_MODEL
+  model?: string
 ): Promise<any> {
   const client = new Mistral({ apiKey });
   const warnings: string[] = [];
@@ -187,7 +191,7 @@ async function processPdfOcr(
   // Build OCR parameters
   const ocrParams: any = {
     document: documentRef,
-    model,
+    model: model || getOcrModel(),
     includeBreakdown: true,
   };
 
@@ -461,7 +465,7 @@ server.registerTool(
 
       const ocrParams: any = {
         document: documentRef,
-        model: DEFAULT_MODEL,
+        model: getOcrModel(),
       };
 
       (ocrParams as any).documentAnnotationFormat = schema;

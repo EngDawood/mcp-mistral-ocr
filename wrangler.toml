@@ -75,6 +75,8 @@ new_sqlite_classes = ["PdfSplitter"]
 #   MCP_AUTH_KEY              MCP only — optional, protects the /mcp endpoint
 [vars]
 ADMIN_ID = "801062947"
+OCR_MODEL = "mistral-ocr-latest"
+AUDIO_MODEL = "voxtral-mini-latest"
 
 [observability]
 enabled = false
