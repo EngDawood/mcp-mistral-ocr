@@ -13,6 +13,11 @@ export const ProcessPdfInputSchema = z.object({
   include_images: z.boolean().default(false),
   include_hyperlinks: z.boolean().default(false),
   embed_images_base64: z.boolean().default(false),
+  rtl_columns: z.enum(["auto", "on", "off"]).default("auto").describe(
+    "Reading order of multi-column pages. Mistral OCR always returns columns left-to-right, " +
+    "which reverses a two-column Arabic or Hebrew page. 'auto' repairs the order for pages " +
+    "detected as right-to-left, 'on' forces it, 'off' returns the OCR order unchanged."
+  ),
 });
 
 export const ProcessUrlInputSchema = z.object({
@@ -32,6 +37,11 @@ export const ProcessUrlInputSchema = z.object({
   include_images: z.boolean().default(false),
   include_hyperlinks: z.boolean().default(false),
   embed_images_base64: z.boolean().default(false),
+  rtl_columns: z.enum(["auto", "on", "off"]).default("auto").describe(
+    "Reading order of multi-column pages. Mistral OCR always returns columns left-to-right, " +
+    "which reverses a two-column Arabic or Hebrew page. 'auto' repairs the order for pages " +
+    "detected as right-to-left, 'on' forces it, 'off' returns the OCR order unchanged."
+  ),
 });
 
 export const ProcessImageInputSchema = z.object({
@@ -41,6 +51,11 @@ export const ProcessImageInputSchema = z.object({
   clean_output: z.boolean().default(false),
   save_to_file: z.boolean().default(true),
   return_content: z.boolean().default(true),
+  rtl_columns: z.enum(["auto", "on", "off"]).default("auto").describe(
+    "Reading order of multi-column pages. Mistral OCR always returns columns left-to-right, " +
+    "which reverses a two-column Arabic or Hebrew page. 'auto' repairs the order for pages " +
+    "detected as right-to-left, 'on' forces it, 'off' returns the OCR order unchanged."
+  ),
 });
 
 export const ExtractStructuredInputSchema = z.object({

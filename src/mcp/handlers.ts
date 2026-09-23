@@ -61,7 +61,7 @@ export async function handleProcessPdf(args: Record<string, unknown>): Promise<T
       catch (e: any) { return err(`Invalid page specification: ${e.message}`, "Use format like '1,5,10-15' for page selection."); }
     }
 
-    const ocrResult = await processPdfOcr(pdfPath, DEFAULT_MODEL, pageNumbers, params.extract_header, params.extract_footer, params.table_format, params.include_images, params.include_hyperlinks, params.embed_images_base64);
+    const ocrResult = await processPdfOcr(pdfPath, DEFAULT_MODEL, pageNumbers, params.extract_header, params.extract_footer, params.table_format, params.include_images, params.include_hyperlinks, params.embed_images_base64, params.rtl_columns);
     let { markdown_content } = ocrResult;
 
     let cleaned = false;
@@ -118,7 +118,7 @@ export async function handleProcessUrl(args: Record<string, unknown>): Promise<T
       catch (e: any) { return err(`Invalid page specification: ${e.message}`, "Use format like '1,5,10-15' for page selection."); }
     }
 
-    const ocrResult = await processPdfOcr(downloadedPdf, DEFAULT_MODEL, pageNumbers, params.extract_header, params.extract_footer, params.table_format, params.include_images, params.include_hyperlinks, params.embed_images_base64);
+    const ocrResult = await processPdfOcr(downloadedPdf, DEFAULT_MODEL, pageNumbers, params.extract_header, params.extract_footer, params.table_format, params.include_images, params.include_hyperlinks, params.embed_images_base64, params.rtl_columns);
     let { markdown_content } = ocrResult;
 
     let cleaned = false;
@@ -168,7 +168,7 @@ export async function handleProcessUrl(args: Record<string, unknown>): Promise<T
 export async function handleProcessImage(args: Record<string, unknown>): Promise<ToolResult> {
   try {
     const params = ProcessImageInputSchema.parse(args);
-    const [rawContent, warnings] = await processImageOcr(params.image_source, params.source_type);
+    const [rawContent, warnings] = await processImageOcr(params.image_source, params.source_type, DEFAULT_MODEL, params.rtl_columns);
 
     let content = params.output_format === "text" ? markdownToText(rawContent) : rawContent;
     let cleaned = false;

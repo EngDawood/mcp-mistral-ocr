@@ -35,7 +35,7 @@ URL. Today the only way to OCR it is to save it to disk first.
 | `callback_data` | 64 bytes | Bot API `InlineKeyboardButton` |
 | `answerCallbackQuery` | **Mandatory** — else the user sees a spinner | Bot API `CallbackQuery` |
 | Mistral OCR document | **50 MB, 1000 pages** | Mistral Document AI FAQ |
-| Mistral audio transcription | 500 MB, 60 min; WAV/MP3/FLAC/OGG/WEBM | Mistral known limitations |
+| Mistral audio transcription | 3 hours; WAV/MP3/FLAC/OGG/M4A/WEBM (bot also passes MPEG/OPUS/MP4, same codecs) | Mistral Speech-to-Text docs (Voxtral Mini Transcribe V2) |
 | Worker memory | **128 MB per isolate**, shared across concurrent requests | CF Workers limits |
 | Worker CPU | Free **10 ms** · Paid 30 s (raisable to 5 min via `limits.cpu_ms`) | CF Workers limits |
 | Worker subrequests | Free **50** · Paid 10,000 | CF Workers limits |

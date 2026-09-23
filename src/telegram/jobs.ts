@@ -9,6 +9,8 @@
 import { Mistral } from "@mistralai/mistralai";
 import { parsePageSpec, markdownToText, cleanMarkdown } from "../shared/utils.js";
 import { filenameFromContentDisposition } from "../shared/source-url.js";
+import { ocrProcess } from "../shared/ocr-api.js";
+import { applyRtlColumnOrder } from "../shared/rtl-layout.js";
 import type { SourceProvider } from "../shared/source-url.js";
 import { signPartUrl } from "./proxy.js";
 import { discardSplit, readSplitStatus, startSplit, SplitterError } from "./splitter.js";
@@ -123,7 +125,7 @@ function buildContent(pages: any[], settings: JobSettings): JobResult {
 }
 
 async function runOcr(
-  client: Mistral,
+  apiKey: string,
   document: Record<string, unknown>,
   settings: JobSettings,
   model: string = DEFAULT_OCR_MODEL
@@ -132,24 +134,38 @@ async function runOcr(
     document,
     model,
     includeImageBase64: settings.images === "embed",
+    // Paragraph positions, so a right-to-left page can be put back in reading
+    // order below (the Columns button chooses when).
+    includeBlocks: settings.rtl !== "off",
   };
   if (!settings.header) params.extractHeader = false;
   if (!settings.footer) params.extractFooter = false;
 
+  let pages: any[];
   try {
-    const res = await client.ocr.process(params as any);
-    return res.pages as any[];
+    const res = await ocrProcess(apiKey, params);
+    pages = res.pages as any[];
   } catch (e: any) {
     // Same graceful fallback the CLI uses: some API versions reject these.
     const msg = String(e?.message ?? e);
     if (msg.includes("extractHeader") || msg.includes("extractFooter")) {
       delete params.extractHeader;
       delete params.extractFooter;
-      const res = await client.ocr.process(params as any);
-      return res.pages as any[];
+      const res = await ocrProcess(apiKey, params);
+      pages = res.pages as any[];
+    } else {
+      throw e;
     }
-    throw e;
   }
+
+  const rtl = applyRtlColumnOrder(pages, settings.rtl);
+  if (rtl.applied) {
+    pages.forEach((page, i) => {
+      page.markdown = rtl.markdown[i];
+    });
+  }
+
+  return pages;
 }
 
 /**
@@ -269,7 +285,7 @@ export async function runJob(
       ? { type: "image_url", imageUrl: sourceUrl }
       : { type: "document_url", documentUrl: sourceUrl };
 
-  const pages = await runOcr(client, document, job.settings, ocrModel);
+  const pages = await runOcr(apiKey, document, job.settings, ocrModel);
 
   await onStep("Building output…");
   return buildContent(pages, job.settings);
@@ -406,7 +422,7 @@ export async function runSplitJob(
 
       const splitOcrModel = env.OCR_MODEL || DEFAULT_OCR_MODEL;
       const pages = await runOcr(
-        client,
+        apiKey,
         { type: "document_url", documentUrl: partUrl },
         partSettings,
         splitOcrModel

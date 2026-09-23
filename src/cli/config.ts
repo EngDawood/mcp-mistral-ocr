@@ -2,6 +2,7 @@ import { promises as fs } from "fs";
 import * as path from "path";
 import * as os from "os";
 import { DEFAULT_OCR_MODEL, DEFAULT_AUDIO_MODEL } from "./args.js";
+import type { RtlMode } from "../shared/rtl-layout.js";
 
 export const DEFAULT_CONFIG_PATH = path.join(os.homedir(), ".mistral-ocr.json");
 
@@ -18,6 +19,7 @@ export interface TypeConfig {
   embedImgs?: boolean;
   dropImgs?: boolean;
   forceOcr?: boolean;
+  rtlColumns?: RtlMode;
   apiKey?: string;
 }
 
@@ -46,13 +48,17 @@ export const BUILT_IN_DEFAULTS: Required<Omit<TypeConfig, "apiKey">> = {
   embedImgs: false,
   dropImgs: false,
   forceOcr: false,
+  rtlColumns: "auto",
 };
 
 // ── Key metadata for validation ────────────────────────────────────────────────
 
 const BOOL_KEYS = new Set(["extractHeader", "extractFooter", "clean", "keepImgs", "embedImgs", "dropImgs", "forceOcr"]);
 const STRING_KEYS = new Set(["model", "audioModel", "apiKey", "downloadDir", "allowedDirs"]);
-const ENUM_KEYS: Record<string, string[]> = { outputFormat: ["md", "txt"] };
+const ENUM_KEYS: Record<string, string[]> = {
+  outputFormat: ["md", "txt"],
+  rtlColumns: ["auto", "on", "off"],
+};
 const GLOBAL_ONLY_KEYS = new Set(["downloadDir", "allowedDirs"]);
 export const ALL_SETTING_KEYS = new Set([...BOOL_KEYS, ...STRING_KEYS, ...Object.keys(ENUM_KEYS)]);
 

@@ -4,6 +4,8 @@ import * as path from "path";
 import * as os from "os";
 import { parsePageSpec } from "../shared/utils.js";
 import { normalizeSourceUrl, filenameFromContentDisposition } from "../shared/source-url.js";
+import { ocrProcess } from "../shared/ocr-api.js";
+import { applyRtlColumnOrder, type RtlMode } from "../shared/rtl-layout.js";
 import type { OcrResult } from "./schemas.js";
 
 export const DEFAULT_MODEL = "mistral-ocr-latest";
@@ -169,9 +171,10 @@ export async function downloadPdfFromUrl(url: string, outputDir?: string): Promi
 export async function processImageOcr(
   imageSource: string,
   sourceType: string,
-  model: string = DEFAULT_MODEL
+  model: string = DEFAULT_MODEL,
+  rtlColumns: RtlMode = "auto"
 ): Promise<[string, string[]]> {
-  const client = new Mistral({ apiKey: getApiKey() });
+  const apiKey = getApiKey();
 
   let imageUrl: string;
   if (sourceType === "url") {
@@ -188,14 +191,17 @@ export async function processImageOcr(
     throw new Error(`Invalid source_type: ${sourceType}`);
   }
 
-  const response = await client.ocr.process({
+  const response = await ocrProcess(apiKey, {
     document: { type: "image_url", imageUrl },
     model,
     includeImageBase64: false,
+    // A scan of a two-column page needs the same reading-order repair a PDF does.
+    includeBlocks: rtlColumns !== "off",
   });
 
-  const content = response.pages.map((page: any) => page.markdown).join("\n\n");
-  return [content, []];
+  const rtl = applyRtlColumnOrder(response.pages, rtlColumns);
+  const content = rtl.markdown.join("\n\n");
+  return [content, rtl.warnings];
 }
 
 export async function processPdfOcr(
@@ -207,9 +213,11 @@ export async function processPdfOcr(
   tableFormat?: string,
   includeImages: boolean = false,
   includeHyperlinks: boolean = false,
-  embedImagesBase64: boolean = false
+  embedImagesBase64: boolean = false,
+  rtlColumns: RtlMode = "auto"
 ): Promise<OcrResult> {
-  const client = new Mistral({ apiKey: getApiKey() });
+  const apiKey = getApiKey();
+  const client = new Mistral({ apiKey });
 
   const fileBytes = await fs.readFile(pdfPath);
   const uploaded = await client.files.upload({
@@ -222,18 +230,21 @@ export async function processPdfOcr(
     document: { type: "document_url", documentUrl: signed.url },
     model,
     includeImageBase64: includeImages || embedImagesBase64,
+    // Paragraph positions, so a right-to-left page can be put back in reading
+    // order (see ../shared/rtl-layout.ts).
+    includeBlocks: rtlColumns !== "off",
   };
   if (!extractHeader) ocrParams.extractHeader = false;
   if (!extractFooter) ocrParams.extractFooter = false;
 
   let response;
   try {
-    response = await client.ocr.process(ocrParams);
+    response = await ocrProcess(apiKey, ocrParams);
   } catch (e: any) {
     if (e.message && (e.message.includes("extractHeader") || e.message.includes("extractFooter"))) {
       delete ocrParams.extractHeader;
       delete ocrParams.extractFooter;
-      response = await client.ocr.process(ocrParams);
+      response = await ocrProcess(apiKey, ocrParams);
     } else {
       throw e;
     }
@@ -241,6 +252,15 @@ export async function processPdfOcr(
 
   const warnings: string[] = [];
   const totalPages = response.pages.length;
+
+  // Repair the column order before anything downstream reads page.markdown.
+  const rtl = applyRtlColumnOrder(response.pages, rtlColumns);
+  if (rtl.applied) {
+    response.pages.forEach((page: any, i: number) => {
+      page.markdown = rtl.markdown[i];
+    });
+  }
+  warnings.push(...rtl.warnings);
 
   let markdownPages: string[];
   let pageObjects: any[];
