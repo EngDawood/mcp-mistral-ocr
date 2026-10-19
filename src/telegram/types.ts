@@ -1,8 +1,5 @@
 /// <reference types="@cloudflare/workers-types" />
 
-// Type-only, so the cycle with splitter.ts costs nothing at runtime.
-import type { PdfSplitter } from "./splitter.js";
-
 /**
  * Shared types for the Telegram bot surface.
  *
@@ -14,63 +11,37 @@ export interface Env {
   // Secrets
   TELEGRAM_TOKEN: string;
   TELEGRAM_WEBHOOK_SECRET: string;
-  PROXY_SIGNING_KEY: string;
-  /** Used only for the owner (ADMIN_ID). Never a fallback for other users. */
-  MISTRAL_API_KEY?: string;
+  /** Key for the docling-api Worker. Spent on behalf of ADMIN_ID and allowed users. */
+  DOCLING_API_KEY: string;
 
   // Config
+  /** Base URL of the docling-api Worker. */
+  DOCLING_URL: string;
   ADMIN_ID?: string;
-  OCR_MODEL?: string;
-  AUDIO_MODEL?: string;
+  /** Comma separated OCR languages. Defaults to "ar,en". */
+  OCR_LANG?: string;
 
   // Bindings
   USER_SESSION: DurableObjectNamespace;
-  /** The PDF splitter container, used for documents over Mistral's 50 MB ceiling. */
-  PDF_SPLITTER: DurableObjectNamespace<PdfSplitter>;
 }
 
 // --- job model -------------------------------------------------------------
 
 export type OutputFormat = "md" | "txt";
 
-/**
- * Image handling in markdown output.
- *
- * The CLI's default mode (OCR every embedded image as its own API call) is deliberately
- * absent: in a chat, one tap of Send would fire hundreds of billed calls with no visible
- * progress, and on the Workers Free plan it blows past the 50-subrequest cap. CLI-only.
- */
+/** Image handling in markdown output. */
 export type ImageMode = "drop" | "keep" | "embed";
-
-/**
- * How a split document's output comes back.
- *
- * Only ever shown for jobs that will actually be split — for everything else
- * there is exactly one output and the choice would be noise.
- */
-export type PartsDelivery = "merge" | "separate";
-
-/**
- * Reading order for multi-column pages. Mistral OCR always returns columns
- * left-to-right, which reverses a two-column Arabic page — see
- * ../shared/rtl-layout.ts.
- */
-export type RtlColumns = "auto" | "on" | "off";
 
 export interface JobSettings {
   format: OutputFormat;
   images: ImageMode;
   clean: boolean;
-  header: boolean;
-  footer: boolean;
+  /** OCR every page even when it has a text layer. */
+  forceOcr: boolean;
   /** Send an inline excerpt alongside the file. Off by default — the file is the deliverable. */
   preview: boolean;
   /** Page spec like "1,5,10-15". Undefined means the whole document. */
   pages?: string;
-  /** One merged file, or one file per part. Only consulted for split jobs. */
-  parts: PartsDelivery;
-  /** Column reading order: detected per page by default, or forced either way. */
-  rtl: RtlColumns;
 }
 
 /** What a job operates on, once the incoming message has been resolved. */
@@ -87,11 +58,6 @@ export interface PendingJob {
   fileSize?: number;
   /** Audio/video duration in seconds, when Telegram told us. */
   duration?: number;
-  /**
-   * Over Mistral's 50 MB limit, so the container has to split it first.
-   * Decided at intake from the link's content-length.
-   */
-  split?: boolean;
   chatId: number;
   /** The confirm panel message, so it can be edited in place. */
   panelMessageId?: number;

@@ -1,60 +1,24 @@
 name = "mistral-ocr-telegram"
-# Single Worker serving both the MCP OCR server (src/worker.ts) and the
-# Telegram bot (src/telegram/) — see src/worker-combined.ts for the routing.
-# Kept the mistral-ocr-telegram name/URL so the Telegram webhook (registered
-# via POST /setup) doesn't need to move; MCP clients should point at
-# https://mistral-ocr-telegram.<account>.workers.dev/mcp instead of the old
-# mcp-mistral-ocr Worker, which is retired.
+# Single Worker serving both the MCP server (src/worker.ts) and the Telegram
+# bot (src/telegram/) — see src/worker-combined.ts for the routing. Both call
+# the docling-api Worker, which owns the container and the monthly budget.
+# Name kept so the registered Telegram webhook URL does not need to move.
 main = "src/worker-combined.ts"
-# Containers need a recent compatibility date; this was raised from 2025-01-28
-# when the PDF splitter was added.
 compatibility_date = "2025-10-01"
 compatibility_flags = ["nodejs_compat"]
 
-# Node compatibility is needed by the @mistralai/mistralai SDK (Blob, Buffer).
-
-# OCR post-processing is real CPU work and scales with document size.
+# Markdown cleaning is real CPU work and scales with document size.
 # Only honoured on the Workers Paid plan (Standard usage model); on Free the
 # 10 ms per-invocation limit applies regardless and large documents will fail.
 [limits]
 cpu_ms = 300000
 
-# One object per Telegram user: holds their API key, saved defaults and pending
+# One object per Telegram user: holds their access flag, saved defaults and pending
 # jobs, and runs jobs from an alarm (15 min wall time) rather than waitUntil,
 # which only extends execution for 30 seconds.
 [[durable_objects.bindings]]
 name = "USER_SESSION"
 class_name = "UserSession"
-
-# PDF splitter sidecar.
-#
-# Mistral refuses documents over 50 MB, and the Worker cannot split one itself:
-# every JS PDF library parses the whole file into memory and the isolate is
-# capped at 128 MB, so a 200 MB scan is impossible rather than merely slow.
-# The container has real memory and disk, runs qpdf, and the Worker only streams
-# the finished parts through to Mistral.
-#
-# `basic` (1 GiB / 4 GB disk) comfortably splits a few-hundred-MB PDF. Raise to
-# "standard-1" (4 GiB / 8 GB) if you hit larger ones — note memory is billed on
-# provisioned size for as long as the instance is awake, so bigger is not free.
-#
-# Deploying without Docker: `wrangler deploy` only needs a local Docker daemon
-# because `image` below is a Dockerfile path. Workers Builds builds it in CI
-# instead, so connect this Worker to the repo and set its deploy command to
-#     npx wrangler deploy
-# It must run on the production branch: other branches default to
-# `wrangler versions upload`, which ships Worker code without publishing a new
-# image or rolling out containers. `wrangler dev` needs Docker too, so the
-# splitter cannot be exercised locally without it.
-[[containers]]
-class_name = "PdfSplitter"
-image = "./container/Dockerfile"
-instance_type = "basic"
-max_instances = 5
-
-[[durable_objects.bindings]]
-name = "PDF_SPLITTER"
-class_name = "PdfSplitter"
 
 [[migrations]]
 tag = "v1"
@@ -64,19 +28,22 @@ new_sqlite_classes = ["UserSession"]
 tag = "v2"
 new_sqlite_classes = ["PdfSplitter"]
 
+# The qpdf splitter container is gone (Docling has no 50 MB document ceiling),
+# so its Durable Object class goes with it.
+[[migrations]]
+tag = "v3"
+deleted_classes = ["PdfSplitter"]
+
 # Secrets (set with: npx wrangler secret put NAME)
 #   TELEGRAM_TOKEN            bot token from @BotFather
 #   TELEGRAM_WEBHOOK_SECRET   random string; also gates POST /setup
-#   PROXY_SIGNING_KEY         random string; signs /f/<token> URLs
-#   MISTRAL_API_KEY           the owner's key (Telegram: only ADMIN_ID gets it;
-#                             MCP tools: primary key, shared with the bot)
-#   DEFAULT_MISTRAL_API_KEY   MCP only — fallback key for callers with no key
-#   MISTRAL_API_KEY_BACKUP    MCP only — used on a 429 from the primary key
-#   MCP_AUTH_KEY              MCP only — optional, protects the /mcp endpoint
+#   DOCLING_API_KEY           key for the docling-api Worker (its API_KEY secret)
+#   MCP_AUTH_KEY              optional, protects the /mcp endpoint
 [vars]
 ADMIN_ID = "801062947"
-OCR_MODEL = "mistral-ocr-4-1"
-AUDIO_MODEL = "voxtral-mini-latest"
+# The docling-api Worker (https://github.com/EngDawood/docling). Replace with your URL.
+DOCLING_URL = "https://docling-api.<your-subdomain>.workers.dev"
+OCR_LANG = "ar,en"
 
 [observability]
 enabled = false

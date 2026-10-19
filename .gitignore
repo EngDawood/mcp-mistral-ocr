@@ -56,3 +56,4 @@ reports/refactor/
 
 # Local test documents
 temp/*
+*.tgz

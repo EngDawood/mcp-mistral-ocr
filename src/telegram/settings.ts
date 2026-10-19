@@ -9,28 +9,19 @@
  * in a chat, so the parser would have nothing to parse. The priority rule is what carries over.
  */
 
-import type { ImageMode, JobSettings, OutputFormat, PartsDelivery, RtlColumns } from "./types.js";
+import type { ImageMode, JobSettings, OutputFormat } from "./types.js";
 
 export const DEFAULT_SETTINGS: JobSettings = {
   // Markdown by default: the result always arrives as a file, where structure is worth keeping.
   // (The CLI defaults to txt; a deliberate divergence for the bot.)
   format: "md",
-  // Decision #10 in CLAUDE.telegram.md — the CLI default would fire one billed API call per
-  // embedded image, invisibly, from a single tap of Send.
   images: "drop",
   clean: false,
-  header: true,
-  footer: true,
+  forceOcr: false,
   // Off by default: the file is the deliverable, and an excerpt of every run
   // clutters the chat for anything longer than a page.
   preview: false,
   pages: undefined,
-  // One file is what almost everyone wants; separate parts are for documents
-  // big enough that a single output is unwieldy.
-  parts: "merge",
-  // Detected per page from the text itself; the button is for the cases the
-  // letter count gets wrong.
-  rtl: "auto",
 };
 
 export function resolveSettings(saved?: Partial<JobSettings> | null): JobSettings {
@@ -39,8 +30,6 @@ export function resolveSettings(saved?: Partial<JobSettings> | null): JobSetting
 
 const FORMAT_CYCLE: OutputFormat[] = ["md", "txt"];
 const IMAGE_CYCLE: ImageMode[] = ["drop", "keep", "embed"];
-const PARTS_CYCLE: PartsDelivery[] = ["merge", "separate"];
-const RTL_CYCLE: RtlColumns[] = ["auto", "on", "off"];
 
 function next<T>(cycle: T[], current: T): T {
   const i = cycle.indexOf(current);
@@ -65,20 +54,11 @@ export function applyToggle(settings: JobSettings, key: string): JobSettings {
     case "clean":
       s.clean = !s.clean;
       break;
-    case "header":
-      s.header = !s.header;
-      break;
-    case "footer":
-      s.footer = !s.footer;
+    case "forceOcr":
+      s.forceOcr = !s.forceOcr;
       break;
     case "preview":
       s.preview = !s.preview;
-      break;
-    case "parts":
-      s.parts = next(PARTS_CYCLE, s.parts);
-      break;
-    case "rtl":
-      s.rtl = next(RTL_CYCLE, s.rtl);
       break;
   }
   return s;
@@ -95,25 +75,10 @@ const FORMAT_LABEL: Record<OutputFormat, string> = {
   txt: "Plain text",
 };
 
-const PARTS_LABEL: Record<PartsDelivery, string> = {
-  merge: "one file",
-  separate: "one per part",
-};
-
-const RTL_LABEL: Record<RtlColumns, string> = {
-  auto: "auto",
-  on: "right-to-left",
-  off: "as scanned",
-};
-
 /** One-line summary shown above the buttons. */
-export function describeSettings(
-  settings: JobSettings,
-  isAudio: boolean,
-  isSplit = false
-): string {
+export function describeSettings(settings: JobSettings, isAudio: boolean): string {
   if (isAudio) {
-    // Pages, images and header/footer are all meaningless for a transcript.
+    // Pages and images are meaningless for a transcript.
     return `Output: ${FORMAT_LABEL[settings.format]}${settings.preview ? " · preview on" : ""}`;
   }
   const bits = [
@@ -121,12 +86,9 @@ export function describeSettings(
     `images ${IMAGE_LABEL[settings.images]}`,
     `pages ${settings.pages || "all"}`,
   ];
-  if (isSplit) bits.push(`output ${PARTS_LABEL[settings.parts]}`);
   if (settings.preview) bits.push("preview on");
   if (settings.clean) bits.push("cleaned");
-  if (settings.rtl !== "auto") bits.push(`columns ${RTL_LABEL[settings.rtl]}`);
-  if (!settings.header) bits.push("no header");
-  if (!settings.footer) bits.push("no footer");
+  if (settings.forceOcr) bits.push("forced OCR");
   return bits.join(" · ");
 }
 
@@ -137,12 +99,7 @@ export function describeSettings(
  * `<action>[:<key>]:<jobId>` — every byte of real state lives in the Durable Object.
  * The router reads `parts[0]` as the action and `parts[parts.length - 1]` as the job id.
  */
-export function buildPanel(
-  jobId: string,
-  settings: JobSettings,
-  isAudio: boolean,
-  isSplit = false
-) {
+export function buildPanel(jobId: string, settings: JobSettings, isAudio: boolean) {
   const rows: Array<Array<{ text: string; callback_data: string }>> = [];
 
   if (isAudio) {
@@ -159,21 +116,7 @@ export function buildPanel(
       { text: `🧹 Clean: ${settings.clean ? "on" : "off"}`, callback_data: `t:clean:${jobId}` },
     ]);
     rows.push([
-      { text: `⬆️ Header: ${settings.header ? "on" : "off"}`, callback_data: `t:header:${jobId}` },
-      { text: `⬇️ Footer: ${settings.footer ? "on" : "off"}`, callback_data: `t:footer:${jobId}` },
-    ]);
-    rows.push([
-      { text: `↔️ Columns: ${RTL_LABEL[settings.rtl]}`, callback_data: `t:rtl:${jobId}` },
-    ]);
-  }
-
-  // Only meaningful when the document is big enough to be split in the first place.
-  if (isSplit) {
-    rows.push([
-      {
-        text: `🧩 Parts: ${PARTS_LABEL[settings.parts]}`,
-        callback_data: `t:parts:${jobId}`,
-      },
+      { text: `🔍 Force OCR: ${settings.forceOcr ? "on" : "off"}`, callback_data: `t:forceOcr:${jobId}` },
     ]);
   }
 

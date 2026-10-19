@@ -5,6 +5,7 @@ import * as readline from "readline";
 import { AUDIO_EXTENSIONS, IMAGE_EXTENSIONS, DOCUMENT_EXTENSIONS } from "./args.js";
 import { parsePageSpec, markdownToText, cleanMarkdown } from "../shared/utils.js";
 import { filenameFromContentDisposition } from "../shared/source-url.js";
+import type { DoclingClient } from "../shared/docling.js";
 
 export { parsePageSpec, markdownToText, cleanMarkdown };
 
@@ -41,12 +42,17 @@ export function expandPath(p: string): string {
   return p.startsWith("~") ? path.join(os.homedir(), p.slice(1)) : path.resolve(p);
 }
 
-export function resolveApiKey(override?: string): string {
-  const key = override ?? process.env.MISTRAL_API_KEY;
-  if (!key) {
-    throw new Error("Set MISTRAL_API_KEY in your environment or .env file, or use --api-key.");
+/** Where the docling-api Worker lives and the key it expects. */
+export function resolveClient(args: { baseUrl?: string; apiKey?: string }): DoclingClient {
+  const baseUrl = args.baseUrl ?? process.env.DOCLING_URL;
+  const apiKey = args.apiKey ?? process.env.DOCLING_API_KEY;
+  if (!baseUrl) {
+    throw new Error("Set DOCLING_URL (e.g. https://docling-api.<account>.workers.dev) in your environment or .env file, or use --base-url.");
   }
-  return key;
+  if (!apiKey) {
+    throw new Error("Set DOCLING_API_KEY in your environment or .env file, or use --api-key.");
+  }
+  return { baseUrl, apiKey };
 }
 
 export async function confirm(question: string): Promise<boolean> {

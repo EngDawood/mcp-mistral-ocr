@@ -1,86 +1,63 @@
 #!/usr/bin/env node
 /**
- * Mistral OCR MCP Server — stdio transport (local version).
+ * Docling MCP Server — stdio transport (local version).
  *
  * Tools:
- *   mistral_ocr_process_pdf        Process a local PDF file
- *   mistral_ocr_process_url        Download and process PDF from URL
- *   mistral_ocr_process_image      Process image file directly
- *   mistral_ocr_extract_structured Extract structured data with JSON schema
- *   mistral_ocr_extract_tables     Extract tables in HTML/markdown format
- *   mistral_ocr_clean_markdown     Clean repetitive content from markdown
+ *   docling_convert         Convert a local file or URL (PDF, Office, image) to text or markdown
+ *   docling_transcribe      Transcribe an audio file or URL
+ *   docling_extract_tables  Pull the tables out of a document
+ *   docling_clean_markdown  Remove repeated headers/footers from markdown
+ *   docling_usage           Container time used this month against the budget
  *
- * Set MISTRAL_API_KEY as an environment variable or in a .env file.
+ * Set DOCLING_URL and DOCLING_API_KEY as environment variables or in a .env file.
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { config } from "dotenv";
 import {
-  ProcessPdfInputSchema,
-  ProcessUrlInputSchema,
-  ProcessImageInputSchema,
-  ExtractStructuredInputSchema,
+  ConvertInputSchema,
+  TranscribeInputSchema,
   ExtractTablesInputSchema,
   CleanMarkdownInputSchema,
+  UsageInputSchema,
 } from "./mcp/schemas.js";
 import {
-  handleProcessPdf,
-  handleProcessUrl,
-  handleProcessImage,
-  handleExtractStructured,
+  handleConvert,
+  handleTranscribe,
   handleExtractTables,
   handleCleanMarkdown,
+  handleUsage,
 } from "./mcp/handlers.js";
 
 config();
 
-const server = new McpServer({ name: "mistral_ocr_mcp", version: "1.0.0" });
+const server = new McpServer({ name: "docling_mcp", version: "2.0.0" });
 
 server.registerTool(
-  "mistral_ocr_process_pdf",
+  "docling_convert",
   {
-    description: "Process a local document file (PDF, DOCX, DOC, PPTX, XLSX, XLS) and extract text or markdown using Mistral OCR. Supports page selection, table extraction, image extraction, and hyperlink extraction.",
-    inputSchema: ProcessPdfInputSchema as any,
+    description: "Convert a document (PDF, DOCX, DOC, PPTX, XLSX, XLS) or image, given as a local path or URL, to text or markdown using Docling. Supports page selection and forced OCR.",
+    inputSchema: ConvertInputSchema as any,
     annotations: { readOnlyHint: false, idempotentHint: true, openWorldHint: true },
   },
-  (params: any) => handleProcessPdf(params)
+  (params: any) => handleConvert(params)
 );
 
 server.registerTool(
-  "mistral_ocr_process_url",
+  "docling_transcribe",
   {
-    description: "Download a PDF from a URL and process it with Mistral OCR. Supports page selection, table/image/hyperlink extraction, and optional local PDF retention.",
-    inputSchema: ProcessUrlInputSchema as any,
+    description: "Transcribe an audio file (local path or URL, up to 25 MB) to text with Whisper.",
+    inputSchema: TranscribeInputSchema as any,
     annotations: { readOnlyHint: false, idempotentHint: true, openWorldHint: true },
   },
-  (params: any) => handleProcessUrl(params)
+  (params: any) => handleTranscribe(params)
 );
 
 server.registerTool(
-  "mistral_ocr_process_image",
+  "docling_extract_tables",
   {
-    description: "Process an image file (PNG, JPG, etc.) with Mistral OCR. Accepts a local file path, URL, or base64-encoded data.",
-    inputSchema: ProcessImageInputSchema as any,
-    annotations: { readOnlyHint: false, idempotentHint: true, openWorldHint: true },
-  },
-  (params: any) => handleProcessImage(params)
-);
-
-server.registerTool(
-  "mistral_ocr_extract_structured",
-  {
-    description: "Extract structured data from a document (PDF, DOCX, DOC, PPTX, XLSX, XLS) or image file using a JSON schema. Returns data matching the provided schema. Limited to 8 pages for annotation.",
-    inputSchema: ExtractStructuredInputSchema as any,
-    annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
-  },
-  (params: any) => handleExtractStructured(params)
-);
-
-server.registerTool(
-  "mistral_ocr_extract_tables",
-  {
-    description: "Extract all tables from a document file (PDF, DOCX, DOC, PPTX, XLSX, XLS) in HTML or markdown format. Saves results to a file alongside the source document.",
+    description: "Extract the tables from a document (local path or URL) as markdown. Saves them to a file next to the source.",
     inputSchema: ExtractTablesInputSchema as any,
     annotations: { readOnlyHint: false, idempotentHint: true, openWorldHint: true },
   },
@@ -88,19 +65,29 @@ server.registerTool(
 );
 
 server.registerTool(
-  "mistral_ocr_clean_markdown",
+  "docling_clean_markdown",
   {
-    description: "Remove repetitive lines (headers/footers appearing 3+ times) from OCR-extracted markdown. Preserves page numbers, footnotes, and DOIs.",
+    description: "Remove repetitive lines (headers/footers appearing 3+ times) from extracted markdown. Preserves page numbers, footnotes, and DOIs.",
     inputSchema: CleanMarkdownInputSchema as any,
     annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   },
   (params: any) => handleCleanMarkdown(params)
 );
 
+server.registerTool(
+  "docling_usage",
+  {
+    description: "Show how much of this month's container-time budget has been used.",
+    inputSchema: UsageInputSchema as any,
+    annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
+  },
+  () => handleUsage()
+);
+
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("Mistral OCR MCP server running on stdio");
+  console.error("Docling MCP server running on stdio");
 }
 
 main().catch((e) => {

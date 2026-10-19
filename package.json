@@ -1,12 +1,13 @@
 {
   "name": "mcp-mistral-ocr",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "author": "Dawood (https://engdawood.com/)",
-  "description": "MCP server and CLI for OCR and audio transcription using Mistral AI — supports PDF, DOCX, PPTX, XLSX, images",
+  "description": "MCP server, Telegram bot and CLI for documents, images and audio using your own Docling API on Cloudflare Containers",
   "type": "module",
   "bin": {
-    "mcp-mistral-ocr": "dist/index.js",
-    "ocr": "dist/cli/index.js"
+    "docling": "dist/cli/index.js",
+    "ocr": "dist/cli/index.js",
+    "docling-mcp": "dist/index.js"
   },
   "files": [
     "dist"
@@ -26,7 +27,7 @@
   },
   "keywords": [
     "mcp",
-    "mistral",
+    "docling",
     "ocr",
     "pdf",
     "docx",
@@ -34,6 +35,7 @@
     "cli",
     "audio",
     "transcription",
+    "whisper",
     "model-context-protocol"
   ],
   "license": "MIT",
@@ -46,18 +48,13 @@
     "url": "https://github.com/EngDawood/mcp-mistral-ocr/issues"
   },
   "dependencies": {
-    "@cloudflare/containers": "^0.3.7",
-    "@mistralai/mistralai": "^1.5.0",
     "@modelcontextprotocol/sdk": "^1.12.1",
     "dotenv": "^16.4.7",
-    "mammoth": "^1.12.0",
-    "turndown": "^7.2.4",
     "zod": "^3.24.2"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260702.1",
     "@types/node": "^22.0.0",
-    "@types/turndown": "^5.0.6",
     "agents": "^0.3.6",
     "typescript": "^5.7.0",
     "wrangler": "~4.105.0"
