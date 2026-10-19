@@ -1,25 +1,24 @@
 import { promises as fs } from "fs";
 import * as path from "path";
 import * as os from "os";
-import { DEFAULT_OCR_MODEL, DEFAULT_AUDIO_MODEL } from "./args.js";
-import type { RtlMode } from "../shared/rtl-layout.js";
+import { DEFAULT_OCR_LANG } from "./args.js";
 
-export const DEFAULT_CONFIG_PATH = path.join(os.homedir(), ".mistral-ocr.json");
+export const DEFAULT_CONFIG_PATH = path.join(os.homedir(), ".docling-cli.json");
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
 export interface TypeConfig {
   outputFormat?: "md" | "txt";
-  model?: string;
-  audioModel?: string;
-  extractHeader?: boolean;
-  extractFooter?: boolean;
   clean?: boolean;
   keepImgs?: boolean;
   embedImgs?: boolean;
   dropImgs?: boolean;
   forceOcr?: boolean;
-  rtlColumns?: RtlMode;
+  /** Comma separated OCR languages. */
+  ocrLang?: string;
+  /** Spoken language for audio. */
+  language?: string;
+  baseUrl?: string;
   apiKey?: string;
 }
 
@@ -37,27 +36,22 @@ export const DEFAULT_DOWNLOAD_DIR = path.join(os.homedir(), "Downloads");
 export type FileTypeKey = "pdf" | "docx" | "img" | "audio";
 export const FILE_TYPES: FileTypeKey[] = ["pdf", "docx", "img", "audio"];
 
-export const BUILT_IN_DEFAULTS: Required<Omit<TypeConfig, "apiKey">> = {
+export const BUILT_IN_DEFAULTS: Required<Omit<TypeConfig, "apiKey" | "baseUrl" | "language">> = {
   outputFormat: "txt",
-  model: DEFAULT_OCR_MODEL,
-  audioModel: DEFAULT_AUDIO_MODEL,
-  extractHeader: true,
-  extractFooter: true,
   clean: false,
   keepImgs: false,
   embedImgs: false,
   dropImgs: false,
   forceOcr: false,
-  rtlColumns: "auto",
+  ocrLang: DEFAULT_OCR_LANG,
 };
 
 // ── Key metadata for validation ────────────────────────────────────────────────
 
-const BOOL_KEYS = new Set(["extractHeader", "extractFooter", "clean", "keepImgs", "embedImgs", "dropImgs", "forceOcr"]);
-const STRING_KEYS = new Set(["model", "audioModel", "apiKey", "downloadDir", "allowedDirs"]);
+const BOOL_KEYS = new Set(["clean", "keepImgs", "embedImgs", "dropImgs", "forceOcr"]);
+const STRING_KEYS = new Set(["ocrLang", "language", "baseUrl", "apiKey", "downloadDir", "allowedDirs"]);
 const ENUM_KEYS: Record<string, string[]> = {
   outputFormat: ["md", "txt"],
-  rtlColumns: ["auto", "on", "off"],
 };
 const GLOBAL_ONLY_KEYS = new Set(["downloadDir", "allowedDirs"]);
 export const ALL_SETTING_KEYS = new Set([...BOOL_KEYS, ...STRING_KEYS, ...Object.keys(ENUM_KEYS)]);
@@ -118,7 +112,7 @@ export async function cmdInit(configPath = DEFAULT_CONFIG_PATH): Promise<void> {
   try {
     await fs.access(configPath);
     console.log(`Config already exists at: ${configPath}`);
-    console.log(`Use 'ocr config show' to view or 'ocr config set <key> <value>' to update.`);
+    console.log(`Use 'docling config show' to view or 'docling config set <key> <value>' to update.`);
     return;
   } catch { /* create it */ }
 
@@ -162,7 +156,7 @@ export async function cmdShow(type: FileTypeKey | undefined, configPath = DEFAUL
 
 export async function cmdSet(type: FileTypeKey | undefined, key: string, value: string, configPath = DEFAULT_CONFIG_PATH): Promise<void> {
   if (type && GLOBAL_ONLY_KEYS.has(key)) {
-    console.error(`'${key}' is a global-only setting — use: ocr config set ${key} <value>`);
+    console.error(`'${key}' is a global-only setting — use: docling config set ${key} <value>`);
     process.exit(1);
   }
   const parsed = parseValue(key, value);
@@ -186,7 +180,7 @@ export async function cmdRemove(type: FileTypeKey | undefined, key: string, conf
     process.exit(1);
   }
   if (type && GLOBAL_ONLY_KEYS.has(key)) {
-    console.error(`'${key}' is a global-only setting — use: ocr config remove ${key}`);
+    console.error(`'${key}' is a global-only setting — use: docling config remove ${key}`);
     process.exit(1);
   }
 
@@ -235,13 +229,13 @@ export async function runConfigCommand(argv: string[], configPath: string): Prom
     return cmdShow(type, configPath);
   }
   if (cmd === "init") {
-    if (type) { console.error("'init' is global only — use: ocr config init"); process.exit(1); }
+    if (type) { console.error("'init' is global only — use: docling config init"); process.exit(1); }
     return cmdInit(configPath);
   }
   if (cmd === "set") {
     const [key, value] = rest.slice(1);
     if (!key || value === undefined) {
-      console.error(`Usage: ocr config ${type ? type + " " : ""}set <key> <value>`);
+      console.error(`Usage: docling config ${type ? type + " " : ""}set <key> <value>`);
       console.error(`Valid keys: ${[...ALL_SETTING_KEYS].join(", ")}`);
       process.exit(1);
     }
@@ -250,7 +244,7 @@ export async function runConfigCommand(argv: string[], configPath: string): Prom
   if (cmd === "remove") {
     const [key] = rest.slice(1);
     if (!key) {
-      console.error(`Usage: ocr config ${type ? type + " " : ""}remove <key>`);
+      console.error(`Usage: docling config ${type ? type + " " : ""}remove <key>`);
       process.exit(1);
     }
     return cmdRemove(type, key, configPath);

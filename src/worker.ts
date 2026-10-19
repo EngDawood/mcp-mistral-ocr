@@ -1,318 +1,126 @@
 /**
- * Cloudflare Worker MCP Server for PDF OCR using Mistral AI
+ * Cloudflare Worker MCP server backed by the docling-api Worker.
  *
- * Remote HTTP/SSE transport version for deployment to Cloudflare Workers.
+ * Remote HTTP/SSE transport. No filesystem here, so sources are URLs or base64.
  *
- * Supported Tools:
- * - mistral_ocr_process_url: Download and process PDF from URL
- * - mistral_ocr_process_image: Process image (URL or base64)
- * - mistral_ocr_extract_structured: Extract structured data from URL/base64
- * - mistral_ocr_extract_tables: Extract tables from URL/base64
- * - mistral_ocr_clean_markdown: Clean repetitive markdown content
+ * Tools:
+ * - docling_convert:        URL or base64 document/image -> text or markdown
+ * - docling_transcribe:     URL or base64 audio -> text
+ * - docling_extract_tables: URL or base64 document -> tables as markdown
+ * - docling_clean_markdown: Remove repeated headers/footers
+ * - docling_usage:          Container time used this month
  *
- * Note: File-based operations are not supported in Workers (no filesystem).
- * Use URLs or base64-encoded content instead.
+ * Env: DOCLING_URL (var), DOCLING_API_KEY (secret), MCP_AUTH_KEY (optional secret).
  */
 
 import { createMcpHandler } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { Mistral } from "@mistralai/mistralai";
 import { z } from "zod";
-import { parsePageSpec, markdownToText, cleanMarkdown, buildSchemaFromJson } from "./shared/utils.js";
+import { cleanMarkdown, parsePageSpec } from "./shared/utils.js";
 import { normalizeSourceUrl } from "./shared/source-url.js";
-import { ocrProcess } from "./shared/ocr-api.js";
-import { applyRtlColumnOrder, type RtlMode } from "./shared/rtl-layout.js";
-
-// Constants
-const DEFAULT_OCR_MODEL = "mistral-ocr-latest";
+import {
+  convertBytes,
+  convertUrl,
+  getUsage,
+  transcribe,
+  type ConvertOptions,
+  type ConvertResult,
+  type DoclingClient,
+} from "./shared/docling.js";
+import { extractHyperlinks, extractTables, finalize, parseLangs } from "./shared/convert.js";
 
 // Module-level env reference, set on each request in the fetch handler.
 // Safe because Cloudflare Workers are single-threaded per isolate.
 let _env: any;
-// User-provided API key from query parameter (overrides env secret)
-let _userApiKey: string | null = null;
 
-function getOcrModel(): string {
-  return _env?.OCR_MODEL || DEFAULT_OCR_MODEL;
+function getClient(): DoclingClient {
+  const baseUrl = _env?.DOCLING_URL;
+  const apiKey = _env?.DOCLING_API_KEY;
+  if (!baseUrl || !apiKey) {
+    throw new Error("DOCLING_URL and DOCLING_API_KEY must be configured on the Worker.");
+  }
+  return { baseUrl, apiKey };
 }
 
 // =============================================================================
-// Zod Input Schemas (Worker-compatible versions)
+// Zod Input Schemas
 // =============================================================================
 
-const ProcessUrlInputSchema = z.object({
-  url: z.string().min(1, "URL cannot be empty").refine(
-    (url) => url.startsWith("http://") || url.startsWith("https://"),
-    "URL must start with http:// or https://"
+const sourceFields = {
+  source: z.string().min(1, "Source cannot be empty").describe(
+    "An http(s) URL, or the file's bytes as base64 (a data: URI is accepted)."
   ),
+  source_type: z.enum(["url", "base64"]).default("url"),
+  filename: z.string().optional().describe(
+    "Name with extension for base64 sources, e.g. 'scan.pdf'. Docling infers the file type from it. Default 'document.pdf'."
+  ),
+  pages: z.string().optional().describe("Pages to keep, e.g. '1,5,10-15'. PDFs only."),
+  force_ocr: z.boolean().default(false),
+  ocr_lang: z.string().optional().describe("OCR languages, comma separated. Default 'ar,en'."),
+};
+
+const ConvertInputSchema = z.object({
+  ...sourceFields,
   output_format: z.enum(["markdown", "text"]).default("text"),
-  pages: z.string().optional(),
-  extract_header: z.boolean().default(true),
-  extract_footer: z.boolean().default(true),
   clean_output: z.boolean().default(false),
-  table_format: z.enum(["markdown", "html"]).optional(),
-  include_images: z.boolean().default(false),
+  images: z.enum(["drop", "keep", "embed"]).default("drop"),
   include_hyperlinks: z.boolean().default(false),
-  rtl_columns: z.enum(["auto", "on", "off"]).default("auto").describe(
-    "Reading order of multi-column pages. Mistral OCR always returns columns left-to-right, " +
-    "which reverses a two-column Arabic or Hebrew page. 'auto' repairs the order for pages " +
-    "detected as right-to-left, 'on' forces it, 'off' returns the OCR order unchanged."
-  ),
 });
 
-const ProcessImageInputSchema = z.object({
-  image_source: z.string().min(1, "Image source cannot be empty"),
-  source_type: z.enum(["url", "base64"]).default("url"), // Removed "file" option
-  output_format: z.enum(["markdown", "text"]).default("text"),
-  clean_output: z.boolean().default(false),
-  rtl_columns: z.enum(["auto", "on", "off"]).default("auto").describe(
-    "Reading order of multi-column pages. Mistral OCR always returns columns left-to-right, " +
-    "which reverses a two-column Arabic or Hebrew page. 'auto' repairs the order for pages " +
-    "detected as right-to-left, 'on' forces it, 'off' returns the OCR order unchanged."
-  ),
-});
-
-const ExtractStructuredInputSchema = z.object({
-  source: z.string().min(1, "Source cannot be empty"),
+const TranscribeInputSchema = z.object({
+  source: z.string().min(1, "Source cannot be empty").describe("An http(s) URL, or the audio bytes as base64."),
   source_type: z.enum(["url", "base64"]).default("url"),
-  json_schema: z.string().min(1, "JSON schema cannot be empty"),
-  pages: z.string().optional(),
-  annotation_type: z.enum(["document", "bbox"]).default("document"),
-  include_images: z.boolean().default(false),
+  content_type: z.string().default("audio/mpeg").describe("MIME type for base64 audio."),
+  language: z.string().optional().describe("Spoken language code, e.g. 'ar'. Default: auto-detect."),
 });
 
-const ExtractTablesInputSchema = z.object({
-  source: z.string().min(1, "Source cannot be empty"),
-  source_type: z.enum(["url", "base64"]).default("url"),
-  table_format: z.enum(["markdown", "html"]).default("html"),
-  pages: z.string().optional(),
-});
+const ExtractTablesInputSchema = z.object(sourceFields);
 
 const CleanMarkdownInputSchema = z.object({
   content: z.string().min(1, "Content cannot be empty"),
 });
 
 // =============================================================================
-// Utility Functions
+// Helpers
 // =============================================================================
 
-function getApiKey(): string {
-  // Priority: user query param > user secret > default fallback
-  const apiKey = _userApiKey || _env?.MISTRAL_API_KEY || _env?.DEFAULT_MISTRAL_API_KEY;
-  if (!apiKey) {
-    throw new Error(
-      "MISTRAL_API_KEY not found. Pass ?apiKey=YOUR_KEY in the URL or configure via wrangler secret."
-    );
-  }
-  return apiKey;
+function base64ToBytes(data: string): Uint8Array {
+  const raw = data.includes(",") ? data.slice(data.indexOf(",") + 1) : data;
+  const binary = atob(raw.replace(/\s+/g, ""));
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
 }
 
-// Secondary key, used only when the primary key hits Mistral's rate limit.
-function getBackupApiKey(): string | undefined {
-  return _env?.MISTRAL_API_KEY_BACKUP || undefined;
-}
-
-function isRateLimitError(error: any): boolean {
-  if (error?.statusCode === 429) return true;
-  return /\b429\b|rate.?limit/i.test(String(error?.message ?? error));
-}
-
-// Runs fn with the primary key; on a 429 from Mistral, retries once with
-// MISTRAL_API_KEY_BACKUP if one is configured and differs from the primary key.
-async function withRateLimitFallback<T>(
-  primaryKey: string,
-  fn: (apiKey: string) => Promise<T>
-): Promise<T> {
-  try {
-    return await fn(primaryKey);
-  } catch (error: any) {
-    const backupKey = getBackupApiKey();
-    if (backupKey && backupKey !== primaryKey && isRateLimitError(error)) {
-      return await fn(backupKey);
-    }
-    throw error;
-  }
-}
-
-async function processImageOcr(
-  imageSource: string,
-  sourceType: string,
-  apiKey: string,
-  model?: string,
-  rtlColumns: RtlMode = "auto"
-): Promise<[string, string[]]> {
-  const warnings: string[] = [];
-
-  let imageUrl: string;
-  if (sourceType === "url") {
-    imageUrl = imageSource;
-  } else if (sourceType === "base64") {
-    if (!imageSource.startsWith("data:")) {
-      imageUrl = `data:image/png;base64,${imageSource}`;
-    } else {
-      imageUrl = imageSource;
-    }
-  } else {
-    throw new Error(`Invalid source_type: ${sourceType}`);
-  }
-
-  const response = await ocrProcess(apiKey, {
-    document: { type: "image_url", imageUrl },
-    model: model || getOcrModel(),
-    // A scan of a two-column page needs the same reading-order repair a PDF does.
-    includeBlocks: rtlColumns !== "off",
-  });
-
-  if (!response.pages || !Array.isArray(response.pages)) {
-    throw new Error("Unexpected OCR response format: no pages returned");
-  }
-
-  const rtl = applyRtlColumnOrder(response.pages, rtlColumns);
-  warnings.push(...rtl.warnings);
-  return [rtl.markdown.join("\n\n"), warnings];
-}
-
-async function processPdfOcr(
-  pdfSource: string,
-  sourceType: "url" | "base64",
-  apiKey: string,
-  outputFormat: "markdown" | "text" = "text",
-  pages?: string,
-  extractHeader: boolean = true,
-  extractFooter: boolean = true,
-  tableFormat?: "markdown" | "html",
-  includeImages: boolean = false,
-  includeHyperlinks: boolean = false,
-  model?: string,
-  rtlColumns: RtlMode = "auto"
-): Promise<any> {
-  const warnings: string[] = [];
-
-  // Build OCR document reference
-  let documentRef: any;
-
-  if (sourceType === "url") {
-    // Pass URL directly to OCR API — no download/upload needed
-    documentRef = { type: "document_url", documentUrl: pdfSource };
-  } else {
-    // base64: pass as data URI
-    const base64Data = pdfSource.includes(",") ? pdfSource.split(",")[1] : pdfSource;
-    documentRef = {
-      type: "document_url",
-      documentUrl: `data:application/pdf;base64,${base64Data}`,
-    };
-  }
-
-  // Build OCR parameters
-  const ocrParams: any = {
-    document: documentRef,
-    model: model || getOcrModel(),
-    // Paragraph positions, so a right-to-left page can be put back in reading
-    // order (see ./shared/rtl-layout.ts).
-    includeBlocks: rtlColumns !== "off",
+async function convert(
+  input: z.infer<typeof ExtractTablesInputSchema>,
+  images: ConvertOptions["images"]
+): Promise<ConvertResult> {
+  const opts: ConvertOptions = {
+    pages: input.pages ? parsePageSpec(input.pages) : undefined,
+    forceOcr: input.force_ocr,
+    ocrLang: parseLangs(input.ocr_lang),
+    images,
   };
-
-  if (pages) {
-    const pageSet = parsePageSpec(pages);
-    ocrParams.pages = Array.from(pageSet);
+  if (input.source_type === "url") {
+    return convertUrl(getClient(), normalizeSourceUrl(input.source).url, opts);
   }
+  return convertBytes(getClient(), base64ToBytes(input.source), input.filename ?? "document.pdf", opts);
+}
 
-  // Try with header/footer extraction first
-  let ocrResponse;
-  try {
-    (ocrParams as any).extractHeader = extractHeader;
-    (ocrParams as any).extractFooter = extractFooter;
-    ocrResponse = await ocrProcess(apiKey, ocrParams);
-  } catch (error: any) {
-    if (error instanceof TypeError || String(error?.message).includes("extract_header")) {
-      delete (ocrParams as any).extractHeader;
-      delete (ocrParams as any).extractFooter;
-      warnings.push("extract_header/extract_footer not supported, retrying without them");
-      ocrResponse = await ocrProcess(apiKey, ocrParams);
-    } else {
-      throw error;
-    }
-  }
-
-  if (!ocrResponse.pages || !Array.isArray(ocrResponse.pages)) {
-    throw new Error("Unexpected OCR response format: no pages returned");
-  }
-
-  // Repair the column order before the pages are joined into one document.
-  const allPages = ocrResponse.pages as any[];
-  const rtl = applyRtlColumnOrder(allPages, rtlColumns);
-  if (rtl.applied) {
-    allPages.forEach((page: any, i: number) => {
-      page.markdown = rtl.markdown[i];
-    });
-  }
-  warnings.push(...rtl.warnings);
-
-  let content = allPages.map((page: any) => page.markdown).join("\n\n");
-  const pageCount = allPages.length;
-  const pagesProcessed = ocrParams.pages || Array.from({ length: pageCount }, (_: any, i: number) => i + 1);
-
-  // Convert format
-  if (outputFormat === "text") {
-    content = markdownToText(content);
-  }
-
-  // Extract tables
-  let tables: any[] = [];
-  if (tableFormat && ocrResponse.pages) {
-    for (const page of ocrResponse.pages as any[]) {
-      if (page.tables) {
-        for (const table of page.tables) {
-          tables.push({
-            page: page.index,
-            format: tableFormat,
-            content: (table as any)[tableFormat] ?? table.markdown,
-          });
-        }
-      }
-    }
-  }
-
-  // Extract images
-  let images: any[] = [];
-  if (includeImages && ocrResponse.pages) {
-    for (const page of ocrResponse.pages as any[]) {
-      if (page.images) {
-        for (const img of page.images) {
-          images.push({
-            page: page.index,
-            url: img.url,
-            alt: img.description || "",
-          });
-        }
-      }
-    }
-  }
-
-  // Extract hyperlinks
-  let hyperlinks: any[] = [];
-  if (includeHyperlinks) {
-    const linkPattern = /\[([^\]]+)\]\(([^)]+)\)/g;
-    let match;
-    while ((match = linkPattern.exec(content)) !== null) {
-      hyperlinks.push({
-        text: match[1],
-        url: match[2],
-      });
-    }
-  }
-
+function json(data: object, isError = false) {
   return {
-    success: true,
-    content,
-    page_count: pageCount,
-    pages_processed: pagesProcessed,
-    format: outputFormat,
-    warnings,
-    tables: tables.length > 0 ? tables : undefined,
-    images: images.length > 0 ? images : undefined,
-    hyperlinks: hyperlinks.length > 0 ? hyperlinks : undefined,
+    content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
+    ...(isError && { isError: true }),
   };
+}
+
+function failure(error: any, fallbackSuggestion: string) {
+  const message = String(error?.message ?? error);
+  const suggestion = /budget/i.test(message)
+    ? "The monthly container budget is used up; it resets next UTC month. See docling_usage."
+    : fallbackSuggestion;
+  return json({ success: false, error: message, suggestion }, true);
 }
 
 // =============================================================================
@@ -320,328 +128,136 @@ async function processPdfOcr(
 // =============================================================================
 
 const server = new McpServer({
-  name: "Mistral OCR MCP (Cloudflare Worker)",
-  version: "1.0.0",
+  name: "Docling MCP (Cloudflare Worker)",
+  version: "2.0.0",
 });
 
-// Tool 1: Process PDF from URL
 server.registerTool(
-  "mistral_ocr_process_url",
+  "docling_convert",
   {
-    description: "Download and process a PDF from a URL using Mistral OCR API",
-    inputSchema: ProcessUrlInputSchema as any,
-    annotations: {
-      readOnlyHint: true,
-      idempotentHint: true,
-      openWorldHint: true,
-    },
+    description:
+      "Convert a document (PDF, DOCX, DOC, PPTX, XLSX, XLS) or image to text or markdown using Docling. Source is a URL or base64.",
+    inputSchema: ConvertInputSchema as any,
+    annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   },
   async (params: Record<string, unknown>) => {
     try {
-      const input = ProcessUrlInputSchema.parse(params);
-      const apiKey = getApiKey();
-
-      // Share links serve a viewer page rather than the file. Note that Mistral
-      // fetches the URL itself here (no filesystem, no proxy on this surface),
-      // so a rewritten link still depends on Google answering Mistral's fetcher.
-      const result = await withRateLimitFallback(apiKey, (key) =>
-        processPdfOcr(
-          normalizeSourceUrl(input.url).url,
-          "url",
-          key,
-          input.output_format,
-          input.pages,
-          input.extract_header,
-          input.extract_footer,
-          input.table_format,
-          input.include_images,
-          input.include_hyperlinks,
-          undefined,
-          input.rtl_columns
-        )
-      );
-
-      if (input.clean_output && result.content) {
-        result.content = cleanMarkdown(result.content);
-        result.cleaned = true;
-      }
-
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(result, null, 2),
-          },
-        ],
-      };
+      const input = ConvertInputSchema.parse(params);
+      const result = await convert(input, input.images);
+      const { content, cleaned } = finalize(result.markdown, input.output_format, input.clean_output);
+      return json({
+        success: true,
+        content,
+        page_count: result.pages.length,
+        pages_processed: result.pageNumbers,
+        format: input.output_format,
+        cleaned,
+        warnings: result.warnings,
+        ...(input.include_hyperlinks && { hyperlinks: extractHyperlinks(result.markdown) }),
+      });
     } catch (error: any) {
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify({
-              success: false,
-              error: error.message,
-              suggestion: "Check URL is valid and points to a PDF file",
-            }, null, 2),
-          },
-        ],
-        isError: true,
-      };
+      return failure(error, "Check the source is a valid URL or base64 and the file type is supported");
     }
   }
 );
 
-// Tool 2: Process Image
 server.registerTool(
-  "mistral_ocr_process_image",
+  "docling_transcribe",
   {
-    description: "Process an image using Mistral OCR API (URL or base64)",
-    inputSchema: ProcessImageInputSchema as any,
-    annotations: {
-      readOnlyHint: true,
-      idempotentHint: true,
-      openWorldHint: true,
-    },
+    description: "Transcribe audio (URL or base64, up to 25 MB) to text with Whisper.",
+    inputSchema: TranscribeInputSchema as any,
+    annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   },
   async (params: Record<string, unknown>) => {
     try {
-      const input = ProcessImageInputSchema.parse(params);
-      const apiKey = getApiKey();
-
-      const [content, warnings] = await withRateLimitFallback(apiKey, (key) =>
-        processImageOcr(input.image_source, input.source_type, key, undefined, input.rtl_columns)
+      const input = TranscribeInputSchema.parse(params);
+      const result = await transcribe(
+        getClient(),
+        input.source_type === "url"
+          ? { url: input.source }
+          : { bytes: base64ToBytes(input.source), contentType: input.content_type },
+        { language: input.language }
       );
-
-      let finalContent = content;
-      if (input.output_format === "text") {
-        finalContent = markdownToText(content);
-      }
-
-      if (input.clean_output) {
-        finalContent = cleanMarkdown(finalContent);
-      }
-
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify({
-              success: true,
-              content: finalContent,
-              format: input.output_format,
-              warnings,
-            }, null, 2),
-          },
-        ],
-      };
+      return json({
+        success: true,
+        content: result.text,
+        language: result.language,
+        duration_seconds: result.duration,
+      });
     } catch (error: any) {
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify({
-              success: false,
-              error: error.message,
-              suggestion: "Check image source is valid URL or base64 data",
-            }, null, 2),
-          },
-        ],
-        isError: true,
-      };
+      return failure(error, "Check the audio source and that it is under 25 MB");
     }
   }
 );
 
-// Tool 3: Extract Structured Data
 server.registerTool(
-  "mistral_ocr_extract_structured",
+  "docling_extract_tables",
   {
-    description: "Extract structured data from PDF/image using JSON schema (URL or base64)",
-    inputSchema: ExtractStructuredInputSchema as any,
-    annotations: {
-      readOnlyHint: true,
-      idempotentHint: true,
-      openWorldHint: true,
-    },
-  },
-  async (params: Record<string, unknown>) => {
-    try {
-      const input = ExtractStructuredInputSchema.parse(params);
-      const apiKey = getApiKey();
-
-      const schema = buildSchemaFromJson(input.json_schema);
-
-      // Determine document type and prepare source
-      let documentRef: any;
-
-      if (input.source_type === "url") {
-        const lowerSource = input.source.toLowerCase();
-        if (lowerSource.endsWith(".pdf")) {
-          documentRef = { type: "document_url", documentUrl: input.source };
-        } else {
-          documentRef = { type: "image_url", imageUrl: input.source };
-        }
-      } else {
-        // base64
-        const src = input.source.startsWith("data:")
-          ? input.source
-          : `data:image/png;base64,${input.source}`;
-        documentRef = { type: "image_url", imageUrl: src };
-      }
-
-      const ocrParams: any = {
-        document: documentRef,
-        model: getOcrModel(),
-      };
-
-      (ocrParams as any).documentAnnotationFormat = schema;
-
-      if (input.pages) {
-        const pageSet = parsePageSpec(input.pages);
-        ocrParams.pages = Array.from(pageSet);
-      }
-
-      const response = await withRateLimitFallback(apiKey, (key) =>
-        new Mistral({ apiKey: key }).ocr.process(ocrParams)
-      );
-
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify({
-              success: true,
-              structured_data: (response as any).documentAnnotation || (response.pages as any[])?.map((p: any) => p.markdown).join("\n\n"),
-              annotation_type: input.annotation_type,
-            }, null, 2),
-          },
-        ],
-      };
-    } catch (error: any) {
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify({
-              success: false,
-              error: error.message,
-              suggestion: "Check source and JSON schema are valid",
-            }, null, 2),
-          },
-        ],
-        isError: true,
-      };
-    }
-  }
-);
-
-// Tool 4: Extract Tables
-server.registerTool(
-  "mistral_ocr_extract_tables",
-  {
-    description: "Extract tables from PDF/image in HTML or markdown format (URL or base64)",
+    description: "Extract the tables from a document (URL or base64) as markdown.",
     inputSchema: ExtractTablesInputSchema as any,
-    annotations: {
-      readOnlyHint: true,
-      idempotentHint: true,
-      openWorldHint: true,
-    },
+    annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   },
   async (params: Record<string, unknown>) => {
     try {
       const input = ExtractTablesInputSchema.parse(params);
-      const apiKey = getApiKey();
-
-      const result = await withRateLimitFallback(apiKey, (key) =>
-        processPdfOcr(
-          input.source,
-          input.source_type,
-          key,
-          "markdown",
-          input.pages,
-          true,
-          true,
-          input.table_format,
-          false,
-          false
-        )
-      );
-
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify({
-              success: true,
-              tables: result.tables || [],
-              page_count: result.page_count,
-              table_format: input.table_format,
-            }, null, 2),
-          },
-        ],
-      };
+      const result = await convert(input, "drop");
+      const tables = extractTables(result.pages, result.pageNumbers);
+      return json({
+        success: true,
+        tables,
+        table_count: tables.length,
+        page_count: result.pages.length,
+        table_format: "markdown",
+        warnings: result.warnings,
+      });
     } catch (error: any) {
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify({
-              success: false,
-              error: error.message,
-              suggestion: "Check source is valid",
-            }, null, 2),
-          },
-        ],
-        isError: true,
-      };
+      return failure(error, "Check the source is valid");
     }
   }
 );
 
-// Tool 5: Clean Markdown
 server.registerTool(
-  "mistral_ocr_clean_markdown",
+  "docling_clean_markdown",
   {
     description: "Clean repetitive content from markdown text (removes headers/footers appearing 3+ times)",
     inputSchema: CleanMarkdownInputSchema as any,
-    annotations: {
-      readOnlyHint: true,
-      idempotentHint: true,
-    },
+    annotations: { readOnlyHint: true, idempotentHint: true },
   },
   async (params: Record<string, unknown>) => {
     try {
       const input = CleanMarkdownInputSchema.parse(params);
       const cleanedContent = cleanMarkdown(input.content);
-
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify({
-              success: true,
-              cleaned_content: cleanedContent,
-              method: "lightweight inline deduplication",
-              original_length: input.content.length,
-              cleaned_length: cleanedContent.length,
-            }, null, 2),
-          },
-        ],
-      };
+      return json({
+        success: true,
+        cleaned_content: cleanedContent,
+        method: "lightweight inline deduplication",
+        original_length: input.content.length,
+        cleaned_length: cleanedContent.length,
+      });
     } catch (error: any) {
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify({
-              success: false,
-              error: error.message,
-            }, null, 2),
-          },
-        ],
-        isError: true,
-      };
+      return json({ success: false, error: error.message }, true);
+    }
+  }
+);
+
+server.registerTool(
+  "docling_usage",
+  {
+    description: "Show how much of this month's container-time budget has been used.",
+    inputSchema: z.object({}) as any,
+    annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
+  },
+  async () => {
+    try {
+      const usage = await getUsage(getClient());
+      return json({
+        success: true,
+        used_hours: Math.round((usage.usedSeconds / 3600) * 100) / 100,
+        limit_hours: Math.round((usage.limitSeconds / 3600) * 100) / 100,
+        awake: usage.awake,
+      });
+    } catch (error: any) {
+      return failure(error, "Check DOCLING_URL and DOCLING_API_KEY");
     }
   }
 );
@@ -671,9 +287,6 @@ export default {
         });
       }
     }
-
-    // Optional: User can provide their own Mistral API key
-    _userApiKey = url.searchParams.get("apiKey");
 
     return createMcpHandler(server)(request, env, ctx);
   },

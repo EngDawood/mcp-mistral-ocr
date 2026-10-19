@@ -4,33 +4,31 @@
  * Why a DO rather than `ctx.waitUntil`: waitUntil only extends execution for
  * 30 seconds after the response, which is far too short for a book. A DO alarm
  * gets 15 minutes of wall time, and the same object gives us per-user state
- * (API key, saved defaults, pending jobs) and natural serialisation of one
+ * (access flag, saved defaults, pending jobs) and natural serialisation of one
  * user's jobs — one binding instead of three.
  */
 
 import { TelegramApi, buildPreview } from "./api.js";
-import { signFileUrl, signSourceUrl } from "./proxy.js";
-import { runJob, runSplitJob, validateUrl, explainError } from "./jobs.js";
+import { runJob, validateUrl, explainError } from "./jobs.js";
 import { normalizeSourceUrl } from "../shared/source-url.js";
-import { containerNameFor } from "./splitter.js";
-import type { PartResult } from "./jobs.js";
+import { parseLangs } from "../shared/convert.js";
 import { resolveSettings, applyToggle, buildPanel, describeSettings } from "./settings.js";
 import type { Env, JobSettings, PendingJob, TgMessage, TgUpdate } from "./types.js";
 import { MAX_DOWNLOAD_BYTES } from "./api.js";
 
-/** Formats Mistral OCR accepts. DOCX/DOC are deliberately absent — see below. */
-const DOC_EXTENSIONS = new Set([".pdf", ".pptx", ".xlsx", ".xls"]);
-const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".avif", ".tif", ".tiff"]);
+/** Formats Docling converts. */
+const DOC_EXTENSIONS = new Set([".pdf", ".docx", ".doc", ".pptx", ".xlsx", ".xls"]);
+const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"]);
 /**
- * What Mistral transcribes natively. It documents WAV, MP3, FLAC, OGG, M4A and
- * WEBM; the rest are the same codecs under another name (MPEG/MPGA are MP3, OGA
- * and OPUS are Ogg, MP4 is the M4A container), so a video's soundtrack works too.
+ * What Whisper on Workers AI transcribes: WAV, MP3, FLAC, OGG, M4A and WEBM; the
+ * rest are the same codecs under another name (MPEG/MPGA are MP3, OGA and OPUS
+ * are Ogg, MP4 is the M4A container), so a video's soundtrack works too.
  * Anything else would need transcoding, which a Worker can't do.
  */
 const AUDIO_EXTENSIONS = new Set([
   ".mp3", ".mpeg", ".mpga", ".wav", ".flac", ".ogg", ".oga", ".opus", ".m4a", ".mp4", ".webm",
 ]);
-/** Name for audio Telegram sent without one — Mistral infers the format from it. */
+/** Name for audio Telegram sent without one — the format is inferred from it. */
 const AUDIO_MIME_EXTENSIONS: Record<string, string> = {
   "audio/mpeg": ".mp3",
   "audio/mp3": ".mp3",
@@ -46,21 +44,19 @@ const AUDIO_MIME_EXTENSIONS: Record<string, string> = {
   "video/mp4": ".mp4",
   "video/webm": ".webm",
 };
-const DEFERRED_EXTENSIONS = new Set([".docx", ".doc"]);
 
-/** Voxtral Mini Transcribe V2 takes up to 3 hours in one request. */
-const MAX_AUDIO_SECONDS = 3 * 60 * 60;
+/** The docling-api Worker's own cap on one audio upload. */
+const MAX_AUDIO_BYTES = 25 * 1024 * 1024;
 const JOB_TTL_MS = 24 * 60 * 60 * 1000;
 
 /** How often one user may ping the owner for access. Protects the owner's inbox. */
 const REQUEST_COOLDOWN_MS = 60 * 60 * 1000;
 
 /**
- * Mistral's document ceiling. Worth checking up front: when a file exceeds it,
- * the API reports "File could not be fetched from url", which sends you hunting
- * for a network fault that isn't there.
+ * Largest linked document accepted. The container fetches links itself, so this
+ * is about its 6 GiB of memory and the monthly time budget, not the isolate.
  */
-const MAX_MISTRAL_BYTES = 50 * 1024 * 1024;
+const MAX_LINK_BYTES = 200 * 1024 * 1024;
 
 function extOf(name: string): string {
   const i = name.lastIndexOf(".");
@@ -82,10 +78,10 @@ export class UserSession {
     // An admin-initiated write, arriving from the owner's own session object.
     // DO stubs are not publicly addressable, so reaching here already implies an
     // in-Worker caller that has passed its own admin check.
-    if (new URL(request.url).pathname === "/admin/key") {
-      const { key } = (await request.json()) as { key: string | null };
-      if (key) await this.ctx.storage.put("apiKey", key);
-      else await this.ctx.storage.delete("apiKey");
+    if (new URL(request.url).pathname === "/admin/access") {
+      const { allowed } = (await request.json()) as { allowed: boolean };
+      if (allowed) await this.ctx.storage.put("allowed", true);
+      else await this.ctx.storage.delete("allowed");
       return new Response("ok");
     }
 
@@ -132,38 +128,31 @@ export class UserSession {
       case "/help":
         return void this.tg.sendMessage(chatId, this.helpText(userId));
 
-      // Keys are the owner's alone. A stranger who finds the bot cannot grant
-      // themselves access by pasting one, and no user is ever asked to leave a
-      // credential sitting in a chat log.
-      case "/setkey": {
-        // Scrub the message carrying the key before anything else — including
-        // when a non-admin sends it, since it is a live credential either way.
-        await this.tg.deleteMessage(chatId, msg.message_id);
+      // Access is the owner's to give. Every conversion spends the owner's
+      // container hours, so a stranger who finds the bot cannot grant themselves
+      // any by asking.
+      case "/allow": {
         if (!this.isAdmin(userId)) {
           return void this.tg.sendMessage(chatId, "Unknown command. Try /help.");
         }
-        const [target, ...keyParts] = rest;
-        const key = keyParts.join("").trim();
-        if (!/^\d+$/.test(target ?? "") || !key) {
-          return void this.tg.sendMessage(chatId, "Usage: /setkey <user_id> <mistral_key>");
+        const target = rest[0];
+        if (!/^\d+$/.test(target ?? "")) {
+          return void this.tg.sendMessage(chatId, "Usage: /allow <user_id>");
         }
-        await this.setKeyFor(Number(target), key);
-        return void this.tg.sendMessage(
-          chatId,
-          `Key set for ${target}. I deleted the message containing it.`
-        );
+        await this.setAccessFor(Number(target), true);
+        return void this.tg.sendMessage(chatId, `${target} can use the bot now.`);
       }
 
-      case "/unsetkey": {
+      case "/deny": {
         if (!this.isAdmin(userId)) {
           return void this.tg.sendMessage(chatId, "Unknown command. Try /help.");
         }
         const revokeId = rest[0];
         if (!/^\d+$/.test(revokeId ?? "")) {
-          return void this.tg.sendMessage(chatId, "Usage: /unsetkey <user_id>");
+          return void this.tg.sendMessage(chatId, "Usage: /deny <user_id>");
         }
-        await this.setKeyFor(Number(revokeId), null);
-        return void this.tg.sendMessage(chatId, `Key removed for ${revokeId}.`);
+        await this.setAccessFor(Number(revokeId), false);
+        return void this.tg.sendMessage(chatId, `Access removed for ${revokeId}.`);
       }
 
       // How a stranger reaches the owner. Without it the bot is a dead end for
@@ -192,7 +181,7 @@ export class UserSession {
             Number(this.env.ADMIN_ID),
             `Access request from ${who} (id ${userId})` +
               (note ? `\n\n"${note}"` : "") +
-              `\n\nGrant with:\n/setkey ${userId} <key>`
+              `\n\nGrant with:\n/allow ${userId}`
           );
         } catch (e) {
           // Almost always means the owner has never opened a chat with the bot,
@@ -248,7 +237,7 @@ export class UserSession {
 
     return void this.tg.sendMessage(
       chatId,
-      "Send me a PDF, image, audio file, or a direct link to one."
+      "Send me a document, image, audio file, or a direct link to one."
     );
   }
 
@@ -259,8 +248,8 @@ export class UserSession {
     const status = await this.tg.sendMessage(chatId, "Checking link…");
 
     // Drive, Docs, Dropbox and GitHub links address a viewer page, not the file.
-    // Rewrite before validating, so the checks below and the bytes Mistral is
-    // eventually handed are all the same URL.
+    // Rewrite before validating, so the checks below and the URL Docling is
+    // eventually handed are all the same.
     const source = normalizeSourceUrl(url);
     const target = source.url;
 
@@ -274,8 +263,8 @@ export class UserSession {
     }
 
     // A direct-download URL carries no filename in its path, so the header the
-    // server sent is the best source. The extension matters: it's what Mistral
-    // infers the document type from via the /f/ proxy tail.
+    // server sent is the best source. The extension matters: it's what Docling
+    // infers the document type from.
     let name = check.fileName ?? source.fileName ?? "document.pdf";
     if (!check.fileName && !source.fileName) {
       try {
@@ -288,22 +277,21 @@ export class UserSession {
     const ext = extOf(name);
     const kind = IMAGE_EXTENSIONS.has(ext) ? "image" : AUDIO_EXTENSIONS.has(ext) ? "audio" : "url";
 
-    // Over Mistral's ceiling the document has to be cut into parts first, and only
-    // a PDF can be cut. Decided here, from the link's content-length, so the panel
-    // can offer the merge/separate choice before anything runs.
-    // Audio isn't bound by the document ceiling, and couldn't be split anyway.
-    let split = false;
-    if (kind !== "audio" && check.size != null && check.size > MAX_MISTRAL_BYTES) {
-      if (ext !== ".pdf") {
+    if (kind === "audio") {
+      if (check.size != null && check.size > MAX_AUDIO_BYTES) {
         return void this.tg.editMessageText(
           chatId,
           status.message_id,
-          `That file is ${fmtSize(check.size)} — over Mistral's 50 MB limit, and only ` +
-            `PDFs can be split into smaller parts.\n\n` +
-            `Convert it to PDF, or split it yourself and send the pieces.`
+          `That audio is ${fmtSize(check.size)}. I can transcribe up to ${fmtSize(MAX_AUDIO_BYTES)} per file.`
         );
       }
-      split = true;
+    } else if (check.size != null && check.size > MAX_LINK_BYTES) {
+      return void this.tg.editMessageText(
+        chatId,
+        status.message_id,
+        `That file is ${fmtSize(check.size)}, over my ${fmtSize(MAX_LINK_BYTES)} limit for links. ` +
+          `Use the CLI for it.`
+      );
     }
 
     const job = await this.createJob({
@@ -311,18 +299,11 @@ export class UserSession {
       url: target,
       fileName: name,
       fileSize: check.size,
-      split,
       chatId,
     });
 
     await this.tg.deleteMessage(chatId, status.message_id);
-    const note = [
-      check.size ? fmtSize(check.size) : "Link OK",
-      split ? "over 50 MB, will be split" : null,
-    ]
-      .filter(Boolean)
-      .join(" · ");
-    await this.renderPanel(job, note);
+    await this.renderPanel(job, check.size ? fmtSize(check.size) : "Link OK");
   }
 
   private async onFile(msg: TgMessage) {
@@ -351,22 +332,12 @@ export class UserSession {
     // Everything below is decided from metadata Telegram already sent —
     // no download, no API call, so bad input fails instantly and for free.
 
-    if (DEFERRED_EXTENSIONS.has(ext)) {
-      return void this.tg.sendMessage(
-        chatId,
-        "I don't handle Word documents yet. Mistral OCR reads them visually and loses " +
-          "hyperlinks and table structure, so the CLI (which parses the Word XML directly) " +
-          "gives a much better result. Use `mistral-ocr-cli` for these."
-      );
-    }
-
     if (size != null && size > MAX_DOWNLOAD_BYTES) {
       return void this.tg.sendMessage(
         chatId,
         `That file is ${fmtSize(size)}. Telegram only lets bots download files up to 20 MB — ` +
           `this is a hard limit on their side, not a setting I can change.\n\n` +
-          `Send me a direct link to it instead — I fetch those myself, and a linked PDF ` +
-          `over 50 MB gets split into parts automatically.`
+          `Send me a direct link to it instead — the converter fetches those itself.`
       );
     }
 
@@ -378,20 +349,20 @@ export class UserSession {
       if (ext && !AUDIO_EXTENSIONS.has(ext)) {
         return void this.tg.sendMessage(
           chatId,
-          `Mistral transcribes MP3, WAV, FLAC, OGG, OPUS, M4A, MP4 and WEBM — ${ext} isn't ` +
+          `I transcribe MP3, WAV, FLAC, OGG, OPUS, M4A, MP4 and WEBM — ${ext} isn't ` +
             `one of them, and I can't convert audio here. Re-encode it and send it again.`
         );
       }
-      if (duration != null && duration > MAX_AUDIO_SECONDS) {
+      if (size != null && size > MAX_AUDIO_BYTES) {
         return void this.tg.sendMessage(
           chatId,
-          `That's ${Math.round(duration / 60)} minutes. Mistral caps transcription at 3 hours.`
+          `That audio is ${fmtSize(size)}. I can transcribe up to ${fmtSize(MAX_AUDIO_BYTES)} per file.`
         );
       }
     } else if (!isImage && ext && !DOC_EXTENSIONS.has(ext)) {
       return void this.tg.sendMessage(
         chatId,
-        `I can't read ${ext} files. Send a PDF, PPTX, XLSX, an image, or audio.`
+        `I can't read ${ext} files. Send a PDF, Word, PowerPoint or Excel file, an image, or audio.`
       );
     }
 
@@ -425,12 +396,11 @@ export class UserSession {
 
   private async renderPanel(job: PendingJob, note?: string) {
     const isAudio = job.kind === "audio";
-    const isSplit = Boolean(job.split);
     const header = `${job.fileName}${note ? ` · ${note}` : ""}`;
     const body =
-      `${header}\n\n${describeSettings(job.settings, isAudio, isSplit)}\n\n` +
+      `${header}\n\n${describeSettings(job.settings, isAudio)}\n\n` +
       `Tap to change, then Send.`;
-    const markup = buildPanel(job.id, job.settings, isAudio, isSplit);
+    const markup = buildPanel(job.id, job.settings, isAudio);
 
     if (job.panelMessageId) {
       await this.tg.editMessageText(job.chatId, job.panelMessageId, body, markup);
@@ -487,8 +457,7 @@ export class UserSession {
 
       case "run": {
         await this.tg.answerCallbackQuery(cq.id, "Started.");
-        const key = await this.resolveApiKey(userId);
-        if (!key) {
+        if (!(await this.hasAccess(userId))) {
           return void this.tg.editMessageText(
             chatId,
             cq.message!.message_id,
@@ -529,15 +498,9 @@ export class UserSession {
 
     try {
       const userId = Number(await this.ctx.storage.get<number>("userId")) || 0;
-      const apiKey = await this.resolveApiKey(userId);
-      if (!apiKey) throw new Error("401 no api key");
+      if (!(await this.hasAccess(userId))) throw new Error("no access");
 
-      const origin = (await this.ctx.storage.get<string>("origin"))!;
-
-      const summary = job.split
-        ? await this.runSplit(job, apiKey, origin, userId, step)
-        : await this.runWhole(job, apiKey, origin, step);
-
+      const summary = await this.runWhole(job, step);
       if (panelId) await this.tg.editMessageText(job.chatId, panelId, `${summary} ✅`);
     } catch (e) {
       console.error("job failed", e);
@@ -550,112 +513,38 @@ export class UserSession {
     }
   }
 
-  /** The ordinary path: one document, one OCR call, one file back. */
-  private async runWhole(
-    job: PendingJob,
-    apiKey: string,
-    origin: string,
-    step: (msg: string) => Promise<void>
-  ): Promise<string> {
-    let sourceUrl: string;
-    if (job.url) {
-      // Pasted links are proxied too, not handed to Mistral directly: their
-      // fetcher is refused by geo-blocked and reputation-filtered origins that
-      // answer Cloudflare without complaint. We stream, so nothing buffers.
-      sourceUrl = await signSourceUrl(
-        origin,
-        this.env.PROXY_SIGNING_KEY,
-        job.url,
-        job.fileName
-      );
-    } else {
-      await step("Locating file…");
+  /** One document, one conversion, one file back. */
+  private async runWhole(job: PendingJob, step: (msg: string) => Promise<void>): Promise<string> {
+    // Pasted links go to Docling as URLs: the container downloads them, so the
+    // Worker never buffers a large file. Telegram files are at most 20 MB, so
+    // those are fetched here and sent along as bytes.
+    let bytes: Uint8Array | undefined;
+    if (!job.url) {
+      await step("Fetching file…");
       const file = await this.tg.getFile(job.fileId!);
       if (!file.file_path) throw new Error("Telegram did not return a file path");
-      sourceUrl = await signFileUrl(
-        origin,
-        this.env.PROXY_SIGNING_KEY,
-        file.file_path,
-        job.fileName
-      );
+      bytes = await this.tg.downloadFile(file.file_path);
     }
 
-    const result = await runJob(job, apiKey, sourceUrl, step, {
-      ocrModel: this.env.OCR_MODEL,
-      audioModel: this.env.AUDIO_MODEL,
-    });
+    const result = await runJob(
+      job,
+      {
+        client: { baseUrl: this.env.DOCLING_URL, apiKey: this.env.DOCLING_API_KEY },
+        ocrLang: parseLangs(this.env.OCR_LANG),
+        bytes,
+        url: job.url,
+      },
+      step
+    );
 
     await step("Sending…");
     const summary =
       job.kind === "audio"
         ? `${job.fileName} → transcript`
-        : `${job.fileName} → ${result.pagesProcessed}/${result.pageCount} pages`;
+        : `${job.fileName} → ${result.pagesProcessed} pages`;
 
     await this.tg.sendDocument(job.chatId, outputName(job), result.content, summary);
     await this.sendFollowUps(job, result.content, result.warnings);
-    return summary;
-  }
-
-  /**
-   * Over Mistral's 50 MB ceiling: the container cuts the document into parts and
-   * each one is OCR'd in turn.
-   *
-   * Nothing here touches the source bytes — the container holds those, and the
-   * parts reach Mistral through the signed `/f/` proxy. In merge mode we do
-   * accumulate the extracted *text*, which is a fraction of the PDF's size.
-   */
-  private async runSplit(
-    job: PendingJob,
-    apiKey: string,
-    origin: string,
-    userId: number,
-    step: (msg: string) => Promise<void>
-  ): Promise<string> {
-    const containerName = containerNameFor(userId);
-    const separate = job.settings.parts === "separate";
-    const base = baseName(job.fileName);
-    const collected: PartResult[] = [];
-
-    const outcome = await runSplitJob(
-      job,
-      apiKey,
-      { env: this.env, containerName, origin },
-      step,
-      async (part) => {
-        if (!separate) {
-          collected.push(part);
-          return;
-        }
-        // Send as we go, so output starts arriving while later parts still run.
-        const name = `${base}-part${String(part.part).padStart(2, "0")}.${job.settings.format}`;
-        await this.tg.sendDocument(
-          job.chatId,
-          name,
-          part.content,
-          `${job.fileName} · part ${part.part} · pages ${part.pageLabel}`
-        );
-      }
-    );
-
-    const plural = outcome.partCount === 1 ? "" : "s";
-    const summary =
-      `${job.fileName} → ${outcome.pagesProcessed}/${outcome.totalPages} pages ` +
-      `in ${outcome.partCount} part${plural}`;
-
-    const warnings = [...outcome.warnings];
-
-    if (separate) {
-      if (job.settings.preview) {
-        warnings.push("Preview skipped — every part arrived as its own file.");
-      }
-      await this.sendFollowUps(job, null, warnings);
-      return summary;
-    }
-
-    await step("Merging…");
-    const content = collected.map((part) => part.content).join("\n\n");
-    await this.tg.sendDocument(job.chatId, outputName(job), content, summary);
-    await this.sendFollowUps(job, content, warnings);
     return summary;
   }
 
@@ -680,17 +569,14 @@ export class UserSession {
   // -------------------------------------------------------------- helpers
 
   /**
-   * The owner uses the Worker secret; everyone else must supply their own.
+   * The owner always has access; everyone else needs the owner's /allow.
    *
-   * Deliberately does NOT mirror `src/worker.ts:84`, whose fallback chain
-   * (`user || MISTRAL_API_KEY || DEFAULT_MISTRAL_API_KEY`) would silently bill
-   * the owner for every stranger who finds the bot.
+   * Every conversion spends the owner's container hours, so there is no
+   * fallback that lets a stranger through.
    */
-  private async resolveApiKey(userId: number): Promise<string | undefined> {
-    if (this.isAdmin(userId)) {
-      return this.env.MISTRAL_API_KEY;
-    }
-    return this.ctx.storage.get<string>("apiKey");
+  private async hasAccess(userId: number): Promise<boolean> {
+    if (this.isAdmin(userId)) return true;
+    return Boolean(await this.ctx.storage.get<boolean>("allowed"));
   }
 
   private isAdmin(userId: number): boolean {
@@ -698,19 +584,19 @@ export class UserSession {
   }
 
   /**
-   * Write (or clear) another user's stored key.
+   * Grant or revoke another user's access.
    *
    * A Durable Object can hold a stub for any other, so the owner's session
    * reaches a user's directly and no public admin route has to exist. The target
    * may never have messaged the bot — its object is created on first write.
    */
-  private async setKeyFor(targetId: number, key: string | null): Promise<void> {
+  private async setAccessFor(targetId: number, allowed: boolean): Promise<void> {
     const ns = this.env.USER_SESSION;
     const stub = ns.get(ns.idFromName(`user:${targetId}`));
-    await stub.fetch("https://session/admin/key", {
+    await stub.fetch("https://session/admin/access", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ key }),
+      body: JSON.stringify({ allowed }),
     });
   }
 
@@ -727,30 +613,27 @@ export class UserSession {
     return [
       "Send me a document, image, audio file, or a direct link, and I'll return the text.",
       "",
-      "Documents: PDF, PPTX, XLSX, XLS (up to 20 MB — Telegram's limit for bots)",
-      "Images: JPG, PNG, AVIF, TIFF",
+      "Documents: PDF, DOCX, DOC, PPTX, XLSX, XLS (up to 20 MB — Telegram's limit for bots)",
+      "Images: JPG, PNG, BMP, WEBP, TIFF",
       "Audio: MP3, WAV, FLAC, OGG, OPUS, M4A, WEBM, voice notes, and the sound of",
-      "  MP4 videos (up to 3 hours)",
-      "Links: anything publicly reachable. PDFs over 50 MB are split into parts",
-      "  and processed automatically — you choose one merged file or one per part",
-      "Google Drive and Docs share links work directly — paste the link as-is.",
-      "  The file has to be shared as \"Anyone with the link\".",
+      "  MP4 videos (up to 25 MB)",
+      "Links: anything publicly reachable, up to 200 MB. Google Drive and Docs share",
+      "  links work directly; the file has to be shared as \"Anyone with the link\".",
       "",
       "After you send something I'll show the settings — tap to change them, then Send.",
+      "The first job after a quiet spell is slower while the converter wakes up.",
       "",
       isAdmin
-        ? "You're the owner, so you use the key configured on the Worker."
+        ? "You're the owner, so you always have access."
         : `Access is granted by the owner. Your user ID is ${userId}.`,
       "",
       "/settings — show your saved defaults",
       ...(isAdmin
         ? [
-            "/setkey <user_id> <key> — give a user access",
-            "/unsetkey <user_id> — revoke it",
+            "/allow <user_id> — give a user access",
+            "/deny <user_id> — revoke it",
           ]
         : ["/request — ask the owner for access"]),
-      "",
-      "Word documents aren't supported here — use the CLI, which preserves links and tables.",
     ].join("\n");
   }
 }

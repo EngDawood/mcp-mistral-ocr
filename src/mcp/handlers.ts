@@ -1,25 +1,23 @@
-import { Mistral } from "@mistralai/mistralai";
 import { promises as fs } from "fs";
+import * as os from "os";
 import * as path from "path";
 import {
-  ProcessPdfInputSchema,
-  ProcessUrlInputSchema,
-  ProcessImageInputSchema,
-  ExtractStructuredInputSchema,
+  ConvertInputSchema,
+  TranscribeInputSchema,
   ExtractTablesInputSchema,
   CleanMarkdownInputSchema,
 } from "./schemas.js";
 import {
-  DEFAULT_MODEL,
-  processPdfOcr,
-  processImageOcr,
-  downloadPdfFromUrl,
-  expandPath,
-  getApiKey,
-} from "./ocr-core.js";
-import { markdownToText, cleanMarkdown, parsePageSpec, buildSchemaFromJson } from "../shared/utils.js";
-
-const SUPPORTED_DOC_EXTENSIONS = [".pdf", ".docx", ".doc", ".pptx", ".xlsx", ".xls"];
+  convertBytes,
+  convertUrl,
+  getUsage,
+  transcribe,
+  type ConvertResult,
+  type DoclingClient,
+} from "../shared/docling.js";
+import { extractHyperlinks, extractTables, finalize, parseLangs } from "../shared/convert.js";
+import { normalizeSourceUrl } from "../shared/source-url.js";
+import { cleanMarkdown, parsePageSpec } from "../shared/utils.js";
 
 type ToolResult = {
   content: Array<{ type: "text"; text: string }>;
@@ -37,334 +35,198 @@ function err(error: string, suggestion?: string): ToolResult {
   };
 }
 
-// ─── Tool 1: Process local PDF ───────────────────────────────────────────────
+const AUDIO_MIME: Record<string, string> = {
+  ".mp3": "audio/mpeg", ".mpeg": "audio/mpeg", ".wav": "audio/wav", ".m4a": "audio/mp4",
+  ".ogg": "audio/ogg", ".opus": "audio/ogg", ".flac": "audio/flac", ".webm": "audio/webm", ".mp4": "audio/mp4",
+};
 
-export async function handleProcessPdf(args: Record<string, unknown>): Promise<ToolResult> {
+function client(): DoclingClient {
+  const baseUrl = process.env.DOCLING_URL;
+  const apiKey = process.env.DOCLING_API_KEY;
+  if (!baseUrl) throw new Error("DOCLING_URL is not set (e.g. https://docling-api.<account>.workers.dev)");
+  if (!apiKey) throw new Error("DOCLING_API_KEY is not set");
+  return { baseUrl, apiKey };
+}
+
+export function expandPath(p: string): string {
+  return p.startsWith("~") ? path.join(os.homedir(), p.slice(1)) : path.resolve(p);
+}
+
+function isUrl(source: string): boolean {
+  return /^https?:\/\//i.test(source);
+}
+
+/** A name for output saved from a URL, taken from the path when it has one. */
+function nameFromUrl(source: string, fallback: string): string {
   try {
-    const params = ProcessPdfInputSchema.parse(args);
-    const pdfPath = expandPath(params.file_path);
+    const base = path.basename(decodeURIComponent(new URL(source).pathname));
+    return base ? base.replace(/\.[^.]+$/, "") || fallback : fallback;
+  } catch {
+    return fallback;
+  }
+}
 
-    try { await fs.access(pdfPath); } catch {
-      return err(`File not found: ${params.file_path}`, "Please provide an absolute path to an existing file.");
-    }
-    const docExt = path.extname(pdfPath).toLowerCase();
-    if (!SUPPORTED_DOC_EXTENSIONS.includes(docExt)) {
-      return err(
-        `Unsupported file type: ${docExt}`,
-        `Supported formats: PDF, DOCX, DOC, PPTX, XLSX, XLS.`
-      );
-    }
+function suggestionFor(message: string): string {
+  if (/budget/i.test(message)) return "The monthly container budget is used up. Check docling_usage; it resets next UTC month.";
+  if (/unauthorized|DOCLING_API_KEY/i.test(message)) return "Check DOCLING_API_KEY and DOCLING_URL.";
+  return "Check the source is valid and DOCLING_URL is reachable.";
+}
+
+async function convertSource(
+  source: string,
+  opts: Parameters<typeof convertUrl>[2]
+): Promise<{ result: ConvertResult; baseDir: string; baseName: string }> {
+  if (isUrl(source)) {
+    const { url } = normalizeSourceUrl(source);
+    const result = await convertUrl(client(), url, opts);
+    return { result, baseDir: process.cwd(), baseName: nameFromUrl(url, "downloaded_document") };
+  }
+  const filePath = expandPath(source);
+  try { await fs.access(filePath); } catch { throw new Error(`File not found: ${source}`); }
+  const bytes = await fs.readFile(filePath);
+  const result = await convertBytes(client(), bytes, path.basename(filePath), opts);
+  return { result, baseDir: path.dirname(filePath), baseName: path.basename(filePath, path.extname(filePath)) };
+}
+
+// ─── Tool 1: convert ─────────────────────────────────────────────────────────
+
+export async function handleConvert(args: Record<string, unknown>): Promise<ToolResult> {
+  try {
+    const params = ConvertInputSchema.parse(args);
 
     let pageNumbers: Set<number> | undefined;
     if (params.pages) {
       try { pageNumbers = parsePageSpec(params.pages); }
-      catch (e: any) { return err(`Invalid page specification: ${e.message}`, "Use format like '1,5,10-15' for page selection."); }
+      catch (e: any) { return err(`Invalid page specification: ${e.message}`, "Use format like '1,5,10-15'."); }
     }
 
-    const ocrResult = await processPdfOcr(pdfPath, DEFAULT_MODEL, pageNumbers, params.extract_header, params.extract_footer, params.table_format, params.include_images, params.include_hyperlinks, params.embed_images_base64, params.rtl_columns);
-    let { markdown_content } = ocrResult;
+    const { result, baseDir, baseName } = await convertSource(params.source, {
+      pages: pageNumbers,
+      forceOcr: params.force_ocr,
+      ocrLang: parseLangs(params.ocr_lang),
+      images: params.images,
+    });
 
-    let cleaned = false;
-    if (params.clean_output && params.output_format === "markdown") {
-      markdown_content = cleanMarkdown(markdown_content);
-      cleaned = true;
-    }
-
-    const finalContent = params.output_format === "text" ? markdownToText(markdown_content) : markdown_content;
+    const { content, cleaned } = finalize(result.markdown, params.output_format, params.clean_output);
 
     let outputFile: string | null = null;
     if (params.save_to_file) {
-      const outputPath = pdfPath.replace(/\.[^.]+$/, params.output_format === "text" ? ".txt" : ".md");
-      await fs.writeFile(outputPath, finalContent, "utf-8");
-      outputFile = outputPath;
+      const dir = params.output_dir ? expandPath(params.output_dir) : baseDir;
+      await fs.mkdir(dir, { recursive: true });
+      outputFile = path.join(dir, baseName + (params.output_format === "text" ? ".txt" : ".md"));
+      await fs.writeFile(outputFile, content, "utf-8");
     }
 
-    const response: any = {
-      success: true,
-      content: params.return_content ? finalContent : null,
-      page_count: ocrResult.total_pages,
-      pages_processed: ocrResult.pages_processed,
-      output_file: outputFile,
-      format: params.output_format,
-      cleaned,
-      warnings: ocrResult.warnings,
-    };
-    if (params.table_format && ocrResult.tables) response.tables = ocrResult.tables;
-    if (params.include_images && ocrResult.images) response.images = ocrResult.images;
-    if (params.include_hyperlinks && ocrResult.hyperlinks) response.hyperlinks = ocrResult.hyperlinks;
-
-    return ok(response);
-  } catch (e: any) {
-    return err(`Tool execution failed: ${e.message}`, "Check the input parameters and try again.");
-  }
-}
-
-// ─── Tool 2: Process PDF from URL ────────────────────────────────────────────
-
-export async function handleProcessUrl(args: Record<string, unknown>): Promise<ToolResult> {
-  const params = ProcessUrlInputSchema.parse(args);
-  let downloadedPdf: string | null = null;
-
-  try {
-    const outputDir = params.output_dir || process.cwd();
-    await fs.mkdir(outputDir, { recursive: true });
-
-    try { downloadedPdf = await downloadPdfFromUrl(params.url, outputDir); }
-    catch (e: any) { return err(`Failed to download PDF: ${e.message}`, "Check the URL is accessible and points to a valid PDF."); }
-
-    let pageNumbers: Set<number> | undefined;
-    if (params.pages) {
-      try { pageNumbers = parsePageSpec(params.pages); }
-      catch (e: any) { return err(`Invalid page specification: ${e.message}`, "Use format like '1,5,10-15' for page selection."); }
-    }
-
-    const ocrResult = await processPdfOcr(downloadedPdf, DEFAULT_MODEL, pageNumbers, params.extract_header, params.extract_footer, params.table_format, params.include_images, params.include_hyperlinks, params.embed_images_base64, params.rtl_columns);
-    let { markdown_content } = ocrResult;
-
-    let cleaned = false;
-    if (params.clean_output && params.output_format === "markdown") {
-      markdown_content = cleanMarkdown(markdown_content);
-      cleaned = true;
-    }
-
-    const finalContent = params.output_format === "text" ? markdownToText(markdown_content) : markdown_content;
-    const outputPath = downloadedPdf.replace(/\.[^.]+$/, params.output_format === "text" ? ".txt" : ".md");
-    await fs.writeFile(outputPath, finalContent, "utf-8");
-
-    const pdfFile = params.keep_pdf ? downloadedPdf : null;
-    if (!params.keep_pdf) await fs.unlink(downloadedPdf);
-
-    const response: any = {
-      success: true,
-      content: params.return_content ? finalContent : null,
-      page_count: ocrResult.total_pages,
-      pages_processed: ocrResult.pages_processed,
-      output_file: outputPath,
-      pdf_file: pdfFile,
-      format: params.output_format,
-      cleaned,
-      warnings: ocrResult.warnings,
-    };
-    if (params.table_format && ocrResult.tables) response.tables = ocrResult.tables;
-    if (params.include_images && ocrResult.images) response.images = ocrResult.images;
-    if (params.include_hyperlinks && ocrResult.hyperlinks) response.hyperlinks = ocrResult.hyperlinks;
-
-    return ok(response);
-  } catch (e: any) {
-    if (downloadedPdf && !params.keep_pdf) {
-      try { await fs.unlink(downloadedPdf); } catch { /* ignore */ }
-    }
-    return err(
-      `Processing failed: ${e.message}`,
-      e.message.includes("MISTRAL_API_KEY")
-        ? "Check your MISTRAL_API_KEY environment variable."
-        : "Ensure the URL points to a valid PDF file."
-    );
-  }
-}
-
-// ─── Tool 3: Process image ────────────────────────────────────────────────────
-
-export async function handleProcessImage(args: Record<string, unknown>): Promise<ToolResult> {
-  try {
-    const params = ProcessImageInputSchema.parse(args);
-    const [rawContent, warnings] = await processImageOcr(params.image_source, params.source_type, DEFAULT_MODEL, params.rtl_columns);
-
-    let content = params.output_format === "text" ? markdownToText(rawContent) : rawContent;
-    let cleaned = false;
-    if (params.clean_output && params.output_format === "markdown") {
-      content = cleanMarkdown(content);
-      cleaned = true;
-    }
-
-    let outputFile: string | null = null;
-    if (params.save_to_file) {
-      const ext = params.output_format === "text" ? ".txt" : ".md";
-      const outputPath = params.source_type === "file"
-        ? expandPath(params.image_source).replace(/\.[^.]+$/, ext)
-        : path.join(process.cwd(), `ocr_output${ext}`);
-      await fs.writeFile(outputPath, content, "utf-8");
-      outputFile = outputPath;
-    }
-
-    return ok({
+    const response: Record<string, unknown> = {
       success: true,
       content: params.return_content ? content : null,
+      page_count: result.pages.length,
+      pages_processed: result.pageNumbers,
       output_file: outputFile,
       format: params.output_format,
       cleaned,
-      warnings,
-    });
+      warnings: result.warnings,
+    };
+    if (params.include_hyperlinks) response.hyperlinks = extractHyperlinks(result.markdown);
+    return ok(response);
   } catch (e: any) {
-    return err(
-      e.message.includes("not found") ? e.message : `Image OCR processing failed: ${e.message}`,
-      e.message.includes("not found")
-        ? "Check that the image file exists at the specified path."
-        : e.message.includes("MISTRAL_API_KEY")
-        ? "Check your MISTRAL_API_KEY environment variable or source_type parameter."
-        : "Ensure the image is valid and in a supported format (PNG, JPG, etc.)."
-    );
+    return err(`Conversion failed: ${e.message}`, suggestionFor(e.message));
   }
 }
 
-// ─── Tool 4: Extract structured data ─────────────────────────────────────────
+// ─── Tool 2: transcribe ──────────────────────────────────────────────────────
 
-export async function handleExtractStructured(args: Record<string, unknown>): Promise<ToolResult> {
+export async function handleTranscribe(args: Record<string, unknown>): Promise<ToolResult> {
   try {
-    const params = ExtractStructuredInputSchema.parse(args);
-    const filePath = expandPath(params.file_path);
+    const params = TranscribeInputSchema.parse(args);
 
-    try { await fs.access(filePath); } catch {
-      return err(`File not found: ${params.file_path}`, "Please provide an absolute path to an existing file.");
-    }
-
-    let schema: Record<string, any>;
-    try { schema = buildSchemaFromJson(params.json_schema); }
-    catch (e: any) { return err(e.message, "Ensure json_schema is valid JSON schema format."); }
-
-    let pageNumbers: Set<number> | undefined;
-    if (params.pages) {
-      try {
-        pageNumbers = parsePageSpec(params.pages);
-        if (pageNumbers.size > 8) {
-          return err(`Document annotation is limited to 8 pages (requested ${pageNumbers.size})`, "Use pages parameter to select 8 or fewer pages.");
-        }
-      } catch (e: any) {
-        return err(`Invalid page specification: ${e.message}`, "Use format like '1,5-8' for page selection.");
-      }
-    }
-
-    const client = new Mistral({ apiKey: getApiKey() });
-    const warnings: string[] = [];
-    const ext = path.extname(filePath).toLowerCase();
-    const IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".tiff", ".tif", ".bmp"];
-
-    let document: any;
-    if (SUPPORTED_DOC_EXTENSIONS.includes(ext)) {
-      const fileBytes = await fs.readFile(filePath);
-      const uploaded = await client.files.upload({
-        file: { fileName: path.basename(filePath), content: new Blob([fileBytes]) },
-        purpose: "ocr" as Parameters<typeof client.files.upload>[0]["purpose"],
-      });
-      const signed = await client.files.getSignedUrl({ fileId: uploaded.id!, expiry: 1 });
-      document = { type: "document_url", documentUrl: signed.url };
-    } else if (IMAGE_EXTENSIONS.includes(ext)) {
-      const fileBytes = await fs.readFile(filePath);
-      const mimeTypes: Record<string, string> = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp", ".avif": "image/avif", ".tiff": "image/tiff", ".tif": "image/tiff", ".bmp": "image/bmp" };
-      const mimeType = mimeTypes[ext] ?? "image/png";
-      document = { type: "image_url", imageUrl: `data:${mimeType};base64,${Buffer.from(fileBytes).toString("base64")}` };
+    let result;
+    let baseDir = process.cwd();
+    let baseName = "transcript";
+    if (isUrl(params.source)) {
+      result = await transcribe(client(), { url: params.source }, { language: params.language });
+      baseName = nameFromUrl(params.source, baseName);
     } else {
-      return err(`Unsupported file type: ${ext}`, "Supported: PDF, DOCX, DOC, PPTX, XLSX, XLS, PNG, JPG, AVIF, TIFF.");
-    }
-
-    const ocrParams: any = {
-      document,
-      model: DEFAULT_MODEL,
-      includeImageBase64: params.include_images,
-      ...(params.annotation_type === "document" && { documentAnnotationFormat: schema }),
-      ...(pageNumbers && { pages: Array.from(pageNumbers) }),
-    };
-
-    let response;
-    try {
-      response = await client.ocr.process(ocrParams);
-    } catch (e: any) {
-      if (e.message?.includes("documentAnnotationFormat")) {
-        warnings.push("Document annotation format not supported in current API version");
-        delete ocrParams.documentAnnotationFormat;
-        response = await client.ocr.process(ocrParams);
-      } else {
-        throw e;
+      const filePath = expandPath(params.source);
+      try { await fs.access(filePath); } catch {
+        return err(`File not found: ${params.source}`, "Please provide an absolute path to an existing file.");
       }
+      const ext = path.extname(filePath).toLowerCase();
+      const bytes = await fs.readFile(filePath);
+      result = await transcribe(
+        client(),
+        { bytes, contentType: AUDIO_MIME[ext] ?? "application/octet-stream" },
+        { language: params.language }
+      );
+      baseDir = path.dirname(filePath);
+      baseName = path.basename(filePath, ext);
     }
 
-    const totalPages = response.pages?.length ?? 0;
-    let pagesProcessed = Array.from({ length: totalPages }, (_, i) => i + 1);
-    if (pageNumbers && totalPages > 8) {
-      warnings.push(`Document has ${totalPages} pages but only first 8 were processed for annotation`);
-      pagesProcessed = pagesProcessed.slice(0, 8);
+    let outputFile: string | null = null;
+    if (params.save_to_file) {
+      const dir = params.output_dir ? expandPath(params.output_dir) : baseDir;
+      await fs.mkdir(dir, { recursive: true });
+      outputFile = path.join(dir, `${baseName}.txt`);
+      await fs.writeFile(outputFile, result.text, "utf-8");
     }
 
     return ok({
       success: true,
-      extracted_data: (response as any).documentAnnotation ?? (response as any).annotations ?? null,
-      page_count: totalPages,
-      pages_processed: pagesProcessed,
-      schema_used: params.json_schema,
-      warnings,
+      content: params.return_content ? result.text : null,
+      language: result.language,
+      duration_seconds: result.duration,
+      output_file: outputFile,
     });
   } catch (e: any) {
-    return err(
-      e.message.includes("MISTRAL_API_KEY") ? e.message : `Structured extraction failed: ${e.message}`,
-      e.message.includes("MISTRAL_API_KEY") ? "Check your MISTRAL_API_KEY environment variable." : "Ensure the file is valid and the schema is correct."
-    );
+    return err(`Transcription failed: ${e.message}`, suggestionFor(e.message));
   }
 }
 
-// ─── Tool 5: Extract tables ───────────────────────────────────────────────────
+// ─── Tool 3: extract tables ──────────────────────────────────────────────────
 
 export async function handleExtractTables(args: Record<string, unknown>): Promise<ToolResult> {
   try {
     const params = ExtractTablesInputSchema.parse(args);
-    const pdfPath = expandPath(params.file_path);
-
-    try { await fs.access(pdfPath); } catch {
-      return err(`File not found: ${params.file_path}`, "Please provide an absolute path to an existing file.");
-    }
-    const tableDocExt = path.extname(pdfPath).toLowerCase();
-    if (!SUPPORTED_DOC_EXTENSIONS.includes(tableDocExt)) {
-      return err(
-        `Unsupported file type: ${tableDocExt}`,
-        `Supported formats: PDF, DOCX, DOC, PPTX, XLSX, XLS.`
-      );
-    }
 
     let pageNumbers: Set<number> | undefined;
     if (params.pages) {
       try { pageNumbers = parsePageSpec(params.pages); }
-      catch (e: any) { return err(`Invalid page specification: ${e.message}`, "Use format like '1,5,10-15' for page selection."); }
+      catch (e: any) { return err(`Invalid page specification: ${e.message}`, "Use format like '1,5,10-15'."); }
     }
 
-    const ocrResult = await processPdfOcr(pdfPath, DEFAULT_MODEL, pageNumbers, true, true, params.table_format);
-    const tables = ocrResult.tables ?? [];
+    const { result, baseDir, baseName } = await convertSource(params.source, {
+      pages: pageNumbers,
+      forceOcr: params.force_ocr,
+      ocrLang: parseLangs(params.ocr_lang),
+      images: "drop",
+    });
+    const tables = extractTables(result.pages, result.pageNumbers);
 
     let outputFile: string | null = null;
     if (params.save_to_file && tables.length > 0) {
-      const ext = params.table_format === "html" ? ".html" : ".md";
-      const baseName = path.basename(pdfPath, tableDocExt);
-      const outputPath = path.join(path.dirname(pdfPath), `${baseName}_tables${ext}`);
-      const tableContent = tables
-        .map((t: any) =>
-          params.table_format === "html"
-            ? `<!-- Table ${t.id} from page ${t.page} -->\n${t.content}`
-            : `## Table ${t.id} (Page ${t.page})\n\n${t.content}`
-        )
-        .join("\n\n");
-      await fs.writeFile(outputPath, tableContent, "utf-8");
-      outputFile = outputPath;
+      outputFile = path.join(baseDir, `${baseName}_tables.md`);
+      await fs.writeFile(
+        outputFile,
+        tables.map((t) => `## Table ${t.id}${t.page ? ` (Page ${t.page})` : ""}\n\n${t.content}`).join("\n\n"),
+        "utf-8"
+      );
     }
 
-    const response: any = {
+    return ok({
       success: true,
       table_count: tables.length,
-      page_count: ocrResult.total_pages,
-      pages_processed: ocrResult.pages_processed,
+      page_count: result.pages.length,
       output_file: outputFile,
-      format: params.table_format,
-      warnings: ocrResult.warnings,
-    };
-    if (params.return_content) response.tables = tables;
-
-    return ok(response);
+      format: "markdown",
+      warnings: result.warnings,
+      ...(params.return_content && { tables }),
+    });
   } catch (e: any) {
-    return err(
-      e.message.includes("MISTRAL_API_KEY") ? e.message : `Table extraction failed: ${e.message}`,
-      e.message.includes("MISTRAL_API_KEY") ? "Check your MISTRAL_API_KEY environment variable." : "Ensure the PDF is valid and contains tables."
-    );
+    return err(`Table extraction failed: ${e.message}`, suggestionFor(e.message));
   }
 }
 
-// ─── Tool 6: Clean markdown ───────────────────────────────────────────────────
+// ─── Tool 4: clean markdown ──────────────────────────────────────────────────
 
 export async function handleCleanMarkdown(args: Record<string, unknown>): Promise<ToolResult> {
   try {
@@ -381,5 +243,21 @@ export async function handleCleanMarkdown(args: Record<string, unknown>): Promis
     });
   } catch (e: any) {
     return err(`Cleaning failed: ${e.message}`, "Ensure the content is valid markdown text.");
+  }
+}
+
+// ─── Tool 5: usage ───────────────────────────────────────────────────────────
+
+export async function handleUsage(): Promise<ToolResult> {
+  try {
+    const usage = await getUsage(client());
+    return ok({
+      success: true,
+      used_hours: Math.round((usage.usedSeconds / 3600) * 100) / 100,
+      limit_hours: Math.round((usage.limitSeconds / 3600) * 100) / 100,
+      awake: usage.awake,
+    });
+  } catch (e: any) {
+    return err(`Usage lookup failed: ${e.message}`, suggestionFor(e.message));
   }
 }

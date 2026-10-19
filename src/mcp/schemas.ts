@@ -1,90 +1,50 @@
 import { z } from "zod";
 
-export const ProcessPdfInputSchema = z.object({
-  file_path: z.string().min(1, "File path cannot be empty"),
-  output_format: z.enum(["markdown", "text"]).default("text"),
-  pages: z.string().optional(),
-  extract_header: z.boolean().default(true),
-  extract_footer: z.boolean().default(true),
-  clean_output: z.boolean().default(false),
-  save_to_file: z.boolean().default(true),
-  return_content: z.boolean().default(true),
-  table_format: z.enum(["markdown", "html"]).optional(),
-  include_images: z.boolean().default(false),
-  include_hyperlinks: z.boolean().default(false),
-  embed_images_base64: z.boolean().default(false),
-  rtl_columns: z.enum(["auto", "on", "off"]).default("auto").describe(
-    "Reading order of multi-column pages. Mistral OCR always returns columns left-to-right, " +
-    "which reverses a two-column Arabic or Hebrew page. 'auto' repairs the order for pages " +
-    "detected as right-to-left, 'on' forces it, 'off' returns the OCR order unchanged."
+const outputFormat = z.enum(["markdown", "text"]).default("text");
+const pages = z.string().optional().describe("Pages to keep, e.g. '1,5,10-15'. PDFs only.");
+const forceOcr = z.boolean().default(false).describe("OCR every page even when it has a text layer.");
+const ocrLang = z.string().optional().describe("OCR languages, comma separated, e.g. 'ar,en'. Default 'ar,en'.");
+const images = z.enum(["drop", "keep", "embed"]).default("drop").describe(
+  "drop: remove image markers. keep: leave Docling's '<!-- image -->' marker. embed: inline base64 images."
+);
+
+export const ConvertInputSchema = z.object({
+  source: z.string().min(1, "Source cannot be empty").describe(
+    "Path to a local file (PDF, DOCX, DOC, PPTX, XLSX, XLS, image) or an http(s) URL."
   ),
+  output_format: outputFormat,
+  pages,
+  clean_output: z.boolean().default(false),
+  force_ocr: forceOcr,
+  ocr_lang: ocrLang,
+  images,
+  include_hyperlinks: z.boolean().default(false),
+  save_to_file: z.boolean().default(true),
+  output_dir: z.string().optional().describe("Where to save when the source is a URL. Default: current directory."),
+  return_content: z.boolean().default(true),
 });
 
-export const ProcessUrlInputSchema = z.object({
-  url: z.string().min(1, "URL cannot be empty").refine(
-    (url) => url.startsWith("http://") || url.startsWith("https://"),
-    "URL must start with http:// or https://"
+export const TranscribeInputSchema = z.object({
+  source: z.string().min(1, "Source cannot be empty").describe(
+    "Path to a local audio file (mp3, wav, m4a, ogg, flac, opus, webm, mp4; up to 25 MB) or an http(s) URL."
   ),
-  output_format: z.enum(["markdown", "text"]).default("text"),
-  pages: z.string().optional(),
-  extract_header: z.boolean().default(true),
-  extract_footer: z.boolean().default(true),
-  clean_output: z.boolean().default(false),
-  keep_pdf: z.boolean().default(false),
+  language: z.string().optional().describe("Spoken language code, e.g. 'ar' or 'en'. Default: auto-detect."),
+  save_to_file: z.boolean().default(true),
   output_dir: z.string().optional(),
   return_content: z.boolean().default(true),
-  table_format: z.enum(["markdown", "html"]).optional(),
-  include_images: z.boolean().default(false),
-  include_hyperlinks: z.boolean().default(false),
-  embed_images_base64: z.boolean().default(false),
-  rtl_columns: z.enum(["auto", "on", "off"]).default("auto").describe(
-    "Reading order of multi-column pages. Mistral OCR always returns columns left-to-right, " +
-    "which reverses a two-column Arabic or Hebrew page. 'auto' repairs the order for pages " +
-    "detected as right-to-left, 'on' forces it, 'off' returns the OCR order unchanged."
-  ),
-});
-
-export const ProcessImageInputSchema = z.object({
-  image_source: z.string().min(1, "Image source cannot be empty"),
-  source_type: z.enum(["url", "file", "base64"]).default("url"),
-  output_format: z.enum(["markdown", "text"]).default("text"),
-  clean_output: z.boolean().default(false),
-  save_to_file: z.boolean().default(true),
-  return_content: z.boolean().default(true),
-  rtl_columns: z.enum(["auto", "on", "off"]).default("auto").describe(
-    "Reading order of multi-column pages. Mistral OCR always returns columns left-to-right, " +
-    "which reverses a two-column Arabic or Hebrew page. 'auto' repairs the order for pages " +
-    "detected as right-to-left, 'on' forces it, 'off' returns the OCR order unchanged."
-  ),
-});
-
-export const ExtractStructuredInputSchema = z.object({
-  file_path: z.string().min(1, "File path cannot be empty"),
-  json_schema: z.string().min(1, "JSON schema cannot be empty"),
-  pages: z.string().optional(),
-  annotation_type: z.enum(["document", "bbox"]).default("document"),
-  include_images: z.boolean().default(false),
 });
 
 export const ExtractTablesInputSchema = z.object({
-  file_path: z.string().min(1, "File path cannot be empty"),
-  table_format: z.enum(["markdown", "html"]).default("html"),
-  pages: z.string().optional(),
+  source: z.string().min(1, "Source cannot be empty").describe("Local file path or http(s) URL."),
+  pages,
+  force_ocr: forceOcr,
+  ocr_lang: ocrLang,
   save_to_file: z.boolean().default(true),
   return_content: z.boolean().default(true),
 });
 
 export const CleanMarkdownInputSchema = z.object({
   content: z.string().min(1, "Content cannot be empty"),
-  config_path: z.string().optional(),
 });
 
-export interface OcrResult {
-  markdown_content: string;
-  total_pages: number;
-  pages_processed: number[];
-  warnings: string[];
-  tables?: any[];
-  images?: any[];
-  hyperlinks?: any[];
-}
+export const UsageInputSchema = z.object({});

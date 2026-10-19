@@ -79,6 +79,13 @@ export class TelegramApi {
     return `${API_ROOT}/file/bot${this.token}/${filePath}`;
   }
 
+  /** Fetch a file's bytes. Bounded by MAX_DOWNLOAD_BYTES, so safe to hold in the isolate. */
+  async downloadFile(filePath: string): Promise<Uint8Array> {
+    const res = await fetch(this.fileUrl(filePath));
+    if (!res.ok) throw new Error(`Telegram file download failed: ${res.status}`);
+    return new Uint8Array(await res.arrayBuffer());
+  }
+
   async sendDocument(chatId: number, fileName: string, content: string, caption?: string) {
     const form = new FormData();
     form.set("chat_id", String(chatId));

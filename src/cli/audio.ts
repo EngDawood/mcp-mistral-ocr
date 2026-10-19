@@ -1,8 +1,13 @@
-import { Mistral } from "@mistralai/mistralai";
 import { promises as fs } from "fs";
 import * as path from "path";
 import { CliArgs } from "./args.js";
-import { resolveApiKey, isAudioFile, isImageFile, isDocumentFile } from "./utils.js";
+import { resolveClient, isAudioFile, isImageFile, isDocumentFile } from "./utils.js";
+import { transcribe } from "../shared/docling.js";
+
+const AUDIO_MIME: Record<string, string> = {
+  ".mp3": "audio/mpeg", ".mpeg": "audio/mpeg", ".wav": "audio/wav", ".m4a": "audio/mp4",
+  ".ogg": "audio/ogg", ".opus": "audio/ogg", ".flac": "audio/flac", ".webm": "audio/webm", ".mp4": "audio/mp4",
+};
 
 export async function transcribeAudio(
   audioPath: string,
@@ -10,16 +15,31 @@ export async function transcribeAudio(
   outputPath: string,
   onStep?: (msg: string) => void
 ): Promise<void> {
-  const client = new Mistral({ apiKey: resolveApiKey(args.apiKey) });
+  const client = resolveClient(args);
   onStep?.("Reading audio file...");
-  const fileBytes = await fs.readFile(audioPath);
+  const bytes = await fs.readFile(audioPath);
   onStep?.("Transcribing...");
-  const response = await client.audio.transcriptions.complete({
-    model: args.audioModel,
-    file: { fileName: path.basename(audioPath), content: new Blob([fileBytes]) },
-  });
+  const result = await transcribe(
+    client,
+    { bytes, contentType: AUDIO_MIME[path.extname(audioPath).toLowerCase()] ?? "application/octet-stream" },
+    { language: args.language }
+  );
   onStep?.("Writing output...");
-  await fs.writeFile(outputPath, response.text, "utf-8");
+  await fs.writeFile(outputPath, result.text, "utf-8");
+}
+
+/** Transcribe audio that lives at a public URL; the Worker downloads it. */
+export async function transcribeAudioUrl(
+  audioUrl: string,
+  args: CliArgs,
+  outputPath: string,
+  onStep?: (msg: string) => void
+): Promise<void> {
+  const client = resolveClient(args);
+  onStep?.("Transcribing...");
+  const result = await transcribe(client, { url: audioUrl }, { language: args.language });
+  onStep?.("Writing output...");
+  await fs.writeFile(outputPath, result.text, "utf-8");
 }
 
 export async function findFiles(

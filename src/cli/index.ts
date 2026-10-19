@@ -4,10 +4,11 @@ import { promises as fs } from "fs";
 import * as path from "path";
 import { config as loadEnv } from "dotenv";
 import { parseArgs, printHelp } from "./args.js";
-import { isAudioFile, isImageFile, isDocumentFile, expandPath, confirmOutputPath, parsePageSpec, markdownToText, probeRemoteName, Spinner } from "./utils.js";
+import { isAudioFile, isImageFile, isDocumentFile, expandPath, confirmOutputPath, parsePageSpec, markdownToText, probeRemoteName, resolveClient, Spinner } from "./utils.js";
 import { normalizeSourceUrl } from "../shared/source-url.js";
-import { processUrl, processPdf, processDocx, processImage } from "./ocr.js";
-import { transcribeAudio, findFiles } from "./audio.js";
+import { processUrl, processFile } from "./ocr.js";
+import { transcribeAudio, transcribeAudioUrl, findFiles } from "./audio.js";
+import { getUsage } from "../shared/docling.js";
 import {
   DEFAULT_CONFIG_PATH,
   DEFAULT_DOWNLOAD_DIR,
@@ -71,6 +72,18 @@ async function main(): Promise<void> {
   // ── Parse args with global config as defaults ─────────────────────────────
   const args = buildArgs(argv, config);
 
+  if (argv.includes("--usage")) {
+    try {
+      const usage = await getUsage(resolveClient(args));
+      const hours = (s: number) => (s / 3600).toFixed(2);
+      console.log(`Container time this month: ${hours(usage.usedSeconds)} h of ${hours(usage.limitSeconds)} h${usage.awake ? " (awake now)" : ""}`);
+    } catch (err) {
+      console.error(`Error: ${(err as Error).message}`);
+      process.exit(1);
+    }
+    return;
+  }
+
   if (!args.input && !args.url) {
     console.error("Error: Provide a file/directory path or --url.");
     printHelp();
@@ -104,8 +117,11 @@ async function main(): Promise<void> {
   // ── URL mode ──────────────────────────────────────────────────────────────
   if (args.url) {
     // URLs are treated as PDF type for config resolution
-    const urlArgs = buildArgs(argv, config, "pdf");
-    const outputExt = urlArgs.toTxt ? ".txt" : ".md";
+    const isAudioUrl = (() => {
+      try { return isAudioFile(new URL(args.url!).pathname); } catch { return false; }
+    })();
+    const urlArgs = buildArgs(argv, config, isAudioUrl ? "audio" : "pdf");
+    const outputExt = isAudioUrl || urlArgs.toTxt ? ".txt" : ".md";
 
     // Share links (Drive, Docs, Dropbox, GitHub) address a viewer page, and the
     // direct-download form they rewrite to has no filename in the path — so ask
@@ -135,8 +151,13 @@ async function main(): Promise<void> {
     console.log(`Processing URL: ${args.url}`);
     const spinner = new Spinner();
     try {
-      const { pageCount } = await processUrl(args.url, urlArgs, pageNumbers, outPath, (msg) => spinner.update(msg));
-      spinner.succeed(`${path.basename(outPath)} (${pageCount} pages)`);
+      if (isAudioUrl) {
+        await transcribeAudioUrl(args.url, urlArgs, outPath, (msg) => spinner.update(msg));
+        spinner.succeed(path.basename(outPath));
+      } else {
+        const { pageCount } = await processUrl(args.url, urlArgs, pageNumbers, outPath, (msg) => spinner.update(msg));
+        spinner.succeed(`${path.basename(outPath)} (${pageCount} pages)`);
+      }
     } catch (err) {
       spinner.fail((err as Error).message);
       process.exit(1);
@@ -184,14 +205,10 @@ async function main(): Promise<void> {
       if (!outPath) { console.log("Skipping processing."); return; }
 
       console.log(`Processing: ${path.basename(inputPath)}`);
-      const ext = path.extname(inputPath).toLowerCase();
-      const useDocx = (ext === ".docx" || ext === ".doc") && !tArgs.forceOcr;
       const spinner = new Spinner();
       const onStep = (msg: string) => spinner.update(msg);
       try {
-        const { pageCount } = useDocx
-          ? await processDocx(inputPath, tArgs, outPath, onStep)
-          : await processPdf(inputPath, tArgs, pageNumbers, outPath, onStep);
+        const { pageCount } = await processFile(inputPath, tArgs, pageNumbers, outPath, onStep);
         spinner.succeed(`${path.basename(outPath)} (${pageCount} pages)`);
       } catch (err) {
         spinner.fail((err as Error).message);
@@ -207,7 +224,7 @@ async function main(): Promise<void> {
       console.log(`Processing image: ${path.basename(inputPath)}`);
       const spinner = new Spinner();
       try {
-        await processImage(inputPath, tArgs, outPath, (msg) => spinner.update(msg));
+        await processFile(inputPath, tArgs, null, outPath, (msg) => spinner.update(msg));
         spinner.succeed(path.basename(outPath));
       } catch (err) {
         spinner.fail((err as Error).message);
@@ -237,12 +254,10 @@ async function main(): Promise<void> {
   } else if (stat.isDirectory()) {
     // ── Directory mode — build type-specific args for each batch ─────────
     const pdfArgs   = buildArgs(argv, config, "pdf");
-    const docxArgs  = buildArgs(argv, config, "docx");
     const imgArgs   = buildArgs(argv, config, "img");
     const audioArgs = buildArgs(argv, config, "audio");
 
     const pdfExt   = pdfArgs.toTxt  ? ".txt" : ".md";
-    const docxExt  = docxArgs.toTxt ? ".txt" : ".md";
     const imgExt   = imgArgs.toTxt  ? ".txt" : ".md";
 
     // findFiles uses global output ext for the "already done?" check
@@ -251,12 +266,11 @@ async function main(): Promise<void> {
 
     const skipNonAudio = args.audioOnly;
     const skipNonMd    = args.mdOnly;
-    const pdfs        = (skipNonAudio || skipNonMd) ? [] : allPdfs.filter(f => !f.toLowerCase().endsWith(".docx") && !f.toLowerCase().endsWith(".doc"));
-    const docxFiles   = (skipNonAudio || skipNonMd) ? [] : allPdfs.filter(f => f.toLowerCase().endsWith(".docx") || f.toLowerCase().endsWith(".doc"));
+    const pdfs        = (skipNonAudio || skipNonMd) ? [] : allPdfs;
     const audio       = (skipNonMd) ? [] : allAudio;
     const images      = (skipNonAudio || skipNonMd) ? [] : allImages;
     const activeMarkdowns = (skipNonAudio || !args.toTxt) ? [] : markdowns;
-    const total = pdfs.length + docxFiles.length + audio.length + images.length + activeMarkdowns.length;
+    const total = pdfs.length + audio.length + images.length + activeMarkdowns.length;
 
     if (total === 0) {
       console.log(`Nothing to process — all files already have output files.`);
@@ -270,7 +284,7 @@ async function main(): Promise<void> {
       const outPath = pdfFile.replace(/\.[^.]+$/, pdfExt);
       console.log(`Processing: ${path.basename(pdfFile)}`);
       try {
-        const { pageCount } = await processPdf(pdfFile, pdfArgs, pageNumbers, outPath);
+        const { pageCount } = await processFile(pdfFile, pdfArgs, pageNumbers, outPath);
         processed++;
         console.log(`  ✓ Completed: ${path.basename(outPath)} (${pageCount} pages)`);
       } catch (err) {
@@ -278,26 +292,11 @@ async function main(): Promise<void> {
       }
     }
 
-    for (const docxFile of docxFiles) {
-      const outPath = docxFile.replace(/\.[^.]+$/, docxExt);
-      console.log(`Processing: ${path.basename(docxFile)}`);
-      try {
-        const useDocx = !docxArgs.forceOcr;
-        const { pageCount } = useDocx
-          ? await processDocx(docxFile, docxArgs, outPath)
-          : await processPdf(docxFile, docxArgs, pageNumbers, outPath);
-        processed++;
-        console.log(`  ✓ Completed: ${path.basename(outPath)} (${pageCount} pages)`);
-      } catch (err) {
-        process.stderr.write(`  ✗ Error: ${path.basename(docxFile)}: ${(err as Error).message}\n`);
-      }
-    }
-
     for (const imageFile of images) {
       const outPath = imageFile.replace(/\.[^.]+$/, imgExt);
       console.log(`Processing image: ${path.basename(imageFile)}`);
       try {
-        await processImage(imageFile, imgArgs, outPath);
+        await processFile(imageFile, imgArgs, null, outPath);
         processed++;
         console.log(`  ✓ Completed: ${path.basename(outPath)}`);
       } catch (err) {
