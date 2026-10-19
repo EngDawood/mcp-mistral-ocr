@@ -104,3 +104,39 @@ against a fake server. These have **not** been run against a real deployment:
 - Arabic scanned-PDF quality and RTL column order (Mistral's `rtl-layout.ts` repair was removed);
 - DOCX hyperlinks (the old path used `mammoth`);
 - the Telegram bot and the Worker MCP server end to end.
+
+## Memory (decisions and context from the Docling migration)
+
+Recorded 2026-10-19. Update this section when a decision changes; do not let it drift.
+
+### Decisions the owner made
+- **Full replace, not hybrid.** Mistral is gone from every surface. Chosen knowing scanned Arabic OCR is
+  likely weaker. If quality turns out unacceptable, the owner decides whether to bring Mistral back as an
+  `--engine` option; do not re-add it unasked.
+- **Audio on Workers AI Whisper**, not Docling's CPU Whisper, so it does not burn container hours.
+- **Hard stop on the budget.** Refuse at about 3.5 h/month rather than allow overage. Target is a $5 bill.
+- **Two repos, one boundary.** `EngDawood/docling` owns the container, auth, budget and `/v1/transcribe`.
+  This repo only holds clients. Budget logic belongs in `docling`, not here.
+
+### The owner's setup
+- Works on Windows (paths like `C:\Users\LEGION\...`); the CLI must keep working with Windows paths.
+- Wants to run `docling <url>` and `ocr "<file>"` from the shell, plus MCP and the Telegram bot.
+- Documents are often Arabic. Treat Arabic and right-to-left quality as a first-class check, not an edge case.
+- The Worker is still named `mistral-ocr-telegram` so the registered Telegram webhook URL stays valid.
+
+### Working preferences
+- Be brief. Say so plainly when something is unknown or unverified.
+- Ask before assuming when a request is ambiguous. Push back when something is overcomplicated and
+  suggest the simpler path.
+- No em dashes in written output.
+- Do not open a PR unless asked.
+
+### Open items (unverified or undone)
+- First real run against a deployed container: confirm the `http_sources`/`file_sources` body, `ocr_lang`
+  `["ar","en"]` with the default OCR engine, and cold-start timing.
+- Whisper with 15 to 25 MB audio, and its Arabic accuracy.
+- Compare scanned Arabic and two-column Arabic output with the old Mistral results.
+- DOCX hyperlinks through Docling.
+- Delete the old `PdfSplitter` container application in Cloudflare if it still exists.
+- `public/index.html` is a stale Mistral page; `package.json` name is still `mcp-mistral-ocr`.
+- `docling` repo has no CLAUDE.md yet; the budget invariant is only documented here.
